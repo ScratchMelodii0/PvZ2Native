@@ -1,1 +1,0 @@
---out-path "E:/Juegos/PvZ 2/PvZ2Native/build/gladsources/glad" --api egl=1.5,gl:compatibility=2.0 --reproducible c --loader 

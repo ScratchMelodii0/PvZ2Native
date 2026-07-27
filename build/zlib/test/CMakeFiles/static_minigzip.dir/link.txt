@@ -1,3 +1,0 @@
-"C:\Program Files\CMake\bin\cmake.exe" -E rm -f CMakeFiles\static_minigzip.dir/objects.a
-C:\mingw64roblauncher\bin\ar.exe qc CMakeFiles\static_minigzip.dir/objects.a @CMakeFiles\static_minigzip.dir\objects1.rsp
-C:\mingw64roblauncher\bin\gcc.exe -O3 -DNDEBUG -Wl,--whole-archive CMakeFiles\static_minigzip.dir/objects.a -Wl,--no-whole-archive -o static_minigzip.exe -Wl,--out-implib,libstatic_minigzip.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\static_minigzip.dir\linkLibs.rsp

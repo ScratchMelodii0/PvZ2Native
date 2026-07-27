@@ -1,3 +1,0 @@
-"C:\Program Files\CMake\bin\cmake.exe" -E rm -f CMakeFiles\zlib_static_example.dir/objects.a
-C:\mingw64roblauncher\bin\ar.exe qc CMakeFiles\zlib_static_example.dir/objects.a @CMakeFiles\zlib_static_example.dir\objects1.rsp
-C:\mingw64roblauncher\bin\gcc.exe -O3 -DNDEBUG -Wl,--whole-archive CMakeFiles\zlib_static_example.dir/objects.a -Wl,--no-whole-archive -o zlib_static_example.exe -Wl,--out-implib,libzlib_static_example.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\zlib_static_example.dir\linkLibs.rsp

@@ -1,3 +1,0 @@
-"C:\Program Files\CMake\bin\cmake.exe" -E rm -f CMakeFiles\pvz2native.dir/objects.a
-C:\mingw64roblauncher\bin\ar.exe qc CMakeFiles\pvz2native.dir/objects.a @CMakeFiles\pvz2native.dir\objects1.rsp
-C:\mingw64roblauncher\bin\g++.exe -O3 -DNDEBUG -static -Wl,--whole-archive CMakeFiles\pvz2native.dir/objects.a -Wl,--no-whole-archive -o pvz2native.exe -Wl,--out-implib,libpvz2native.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\pvz2native.dir\linkLibs.rsp

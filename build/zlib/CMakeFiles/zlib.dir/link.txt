@@ -1,3 +1,0 @@
-"C:\Program Files\CMake\bin\cmake.exe" -E rm -f CMakeFiles\zlib.dir/objects.a
-C:\mingw64roblauncher\bin\ar.exe qc CMakeFiles\zlib.dir/objects.a @CMakeFiles\zlib.dir\objects1.rsp
-C:\mingw64roblauncher\bin\gcc.exe -O3 -DNDEBUG -shared -o libz.dll -Wl,--out-implib,libz.dll.a -Wl,--major-image-version,1,--minor-image-version,4 -Wl,--whole-archive CMakeFiles\zlib.dir/objects.a -Wl,--no-whole-archive @CMakeFiles\zlib.dir\linkLibs.rsp
