@@ -1,0 +1,38 @@
+#IncludeRegexLine: ^[ 	]*[#%][ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+E:/Juegos/PvZ 2/PvZ2Native/zlib/win32/zlib1.rc
+winver.h
+-
+../zlib.h
+E:/Juegos/PvZ 2/PvZ2Native/zlib/zlib.h
+
+E:/Juegos/PvZ 2/PvZ2Native/zlib/zlib.h
+zconf.h
+-
+zconf.h
+E:/Juegos/PvZ 2/PvZ2Native/zlib/zconf.h
+
+zlib/zconf.h
+stddef.h
+-
+windows.h
+-
+limits.h
+-
+sys/types.h
+-
+stdarg.h
+-
+stddef.h
+-
+unistd.h
+-
+unixio.h
+-
+

@@ -216,11 +216,6 @@ void register_libgles(ImportTable &t);
 bool gl_strict_enabled();
 void gl_check_error_after(GuestCall &c, const char *name);
 
-/* The real drawable size, which the GL layer needs for exactly one thing: the
- * composite-to-screen pass arrives with a zero-width viewport, and a viewport
- * of width 0 turns every following draw into a silent no-op. See
- * gl_glViewport in libgles.cpp. */
-void set_drawable_size(std::uint32_t width, std::uint32_t height);
 void register_libstdcxx(ImportTable &t);
 void register_libopensles(ImportTable &t);
 void register_libdl(ImportTable &t);

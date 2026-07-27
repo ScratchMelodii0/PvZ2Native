@@ -1,0 +1,2 @@
+C:\mingw64roblauncher\bin\ar.exe qc libmcl.a CMakeFiles/mcl.dir/assert.cpp.obj
+C:\mingw64roblauncher\bin\ranlib.exe libmcl.a

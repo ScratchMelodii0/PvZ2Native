@@ -25,8 +25,8 @@ uint32_t rd24(const std::vector<uint8_t> &b, size_t off) {
 
 std::string RsbIndex::normalize(const std::string &guest_path) {
     std::string s = guest_path;
-    static const char kScheme[] = "ASSET:";
-    if (s.compare(0, sizeof(kScheme) - 1, kScheme) == 0) s.erase(0, sizeof(kScheme) - 1);
+    if (s.compare(0, kAssetSchemeLen, kAssetScheme) == 0)
+        s.erase(0, kAssetSchemeLen);
     for (char &c : s) {
         if (c == '/') c = '\\';
         c = (char)std::toupper((unsigned char)c);
@@ -44,6 +44,16 @@ bool RsbIndex::load(const std::string &obb_path) {
         std::printf("pvz2: [rsb-index] cannot open '%s'\n", obb_path.c_str());
         return false;
     }
+
+    /* The only bound the name-list reads can be checked against that is true of
+     * every RSB -- see the per-RSG check below for why the record's own size
+     * field is not usable. */
+    uint64_t file_size = 0;
+    if (std::fseek(f, 0, SEEK_END) == 0) {
+        const long end = std::ftell(f);
+        if (end > 0) file_size = (uint64_t)end;
+    }
+    std::rewind(f);
 
     std::vector<uint8_t> head(0x100);
     if (std::fread(head.data(), 1, head.size(), f) != head.size() ||
@@ -71,26 +81,49 @@ bool RsbIndex::load(const std::string &obb_path) {
     }
 
     uint32_t skipped = 0;
+    uint32_t obscured = 0;
     std::vector<uint8_t> rsg;
     for (uint32_t i = 0; i < rsg_number; ++i) {
         const size_t rec = (size_t)i * rsg_info_each;
         const uint32_t rsg_off = rd32(info, rec + 0x80);
-        const uint32_t rsg_size = rd32(info, rec + 0x84);
-        if (rsg_off == 0 || rsg_size == 0) continue;
+        if (rsg_off == 0) continue;
 
         /* Only the header and the name list are needed, never the payload --
          * but the list sits at an arbitrary offset, so read up to its end. */
         std::vector<uint8_t> hdr(0x60);
         if (std::fseek(f, (long)rsg_off, SEEK_SET) != 0 ||
-            std::fread(hdr.data(), 1, hdr.size(), f) != hdr.size() ||
-            std::memcmp(hdr.data(), "pgsr", 4) != 0) {
+            std::fread(hdr.data(), 1, hdr.size(), f) != hdr.size()) {
             ++skipped;
             continue;
         }
-        const uint32_t data_off = rd32(hdr, 0x14);
+
+        /* A missing "pgsr" is NOT a reason to skip.
+         *
+         * Reflourished's RSB scrambles the first 0x40 bytes of every RSG header
+         * -- magic included -- and leaves the rest in the clear. Requiring the
+         * magic threw away all 2935 of its RSGs and left the game with no assets
+         * at all, which surfaced far downstream as a SIGFPE. Everything this
+         * index needs happens to lie outside that window:
+         *
+         *   list_len (+0x48), list_beg (+0x4C)  -- plaintext in both formats,
+         *   data_off                            -- the RSG info record mirrors
+         *       the RSG header from +0x10 onward at +0x8C, so the copy of
+         *       header +0x14 sits at record +0x90 and is readable either way.
+         *
+         * Verified on both builds before being relied on: taking data_off from
+         * the record instead of the header reproduces 4.5.2's index EXACTLY
+         * (3710 files, identical offsets and sizes) and turns 9.6.1's 0 into
+         * 9015. So there is one path, not a per-version branch. */
+        if (std::memcmp(hdr.data(), "pgsr", 4) != 0) ++obscured;
+
+        const uint32_t data_off = rd32(info, rec + 0x90);
         const uint32_t list_len = rd32(hdr, 0x48);
         const uint32_t list_beg = rd32(hdr, 0x4C);
-        if (list_len == 0 || (uint64_t)list_beg + list_len > rsg_size) {
+        /* Bounded against the FILE, not against the record's size field: that
+         * field is meaningful in a stock RSB and holds an unrelated value in a
+         * scrambled one, so trusting it would re-introduce the same wholesale
+         * skip by another route. */
+        if (list_len == 0 || (uint64_t)rsg_off + list_beg + list_len > file_size) {
             ++skipped;
             continue;
         }
@@ -142,6 +175,18 @@ bool RsbIndex::load(const std::string &obb_path) {
     loaded_ = !entries_.empty();
     std::printf("pvz2: [rsb-index] %zu files indexed from %u RSGs (%u skipped) in '%s'\n",
                 entries_.size(), rsg_number, skipped, obb_path.c_str());
+    if (obscured != 0) {
+        std::printf("pvz2: [rsb-index] %u RSG header(s) had no 'pgsr' magic -- this RSB scrambles "
+                    "the first 0x40 bytes of each; indexed from the fields outside that window\n",
+                    obscured);
+    }
+    /* An RSB that parsed structurally but yielded nothing is worse than one that
+     * failed to open: every later ASSET: lookup misses, the engine divides by a
+     * count it assumed non-zero, and the crash lands nowhere near here. */
+    if (!loaded_) {
+        std::printf("pvz2: [rsb-index] [!] NO files indexed -- every ASSET: path will miss and the "
+                    "engine will fail somewhere far from this message\n");
+    }
     return loaded_;
 }
 

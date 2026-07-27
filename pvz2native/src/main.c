@@ -1,25 +1,29 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <SDL.h>
 #include <glad/gl.h>
 #include <pvz2native/config.h>
-#include <pvz2native/game_parameters.h>
 #include <pvz2native/gfx/frame_limiter.h>
 #include <pvz2native/gfx/gl_requirements.h>
 #include <pvz2native/gfx/video_mode.h>
 #include <pvz2native/input/input_queue.h>
 #include <pvz2native/pvz2_session.h>
+#include <pvz2native/surface.h>
 
-/* The engine renders at a fixed resolution (pvz2_render_size); the window can be
- * any size and the compositor scales to it. So input arrives in window pixels
- * and has to be mapped back into that fixed render space, or a click lands
- * somewhere else once the window is not exactly the render size. Filled from
- * pvz2_render_size() at startup; the window size is tracked on every resize. */
-static int g_render_w = 960, g_render_h = 540;
-static int g_win_w = 960, g_win_h = 540;
-
-static int to_render_x(int x) { return g_win_w > 0 ? x * g_render_w / g_win_w : x; }
-static int to_render_y(int y) { return g_win_h > 0 ? y * g_render_h / g_win_h : y; }
+/* Input arrives in window pixels, but the engine's touch space is frozen at the
+ * launch resolution, so every coordinate has to be mapped back into it or a click
+ * lands somewhere else once the window is not exactly that size. Both sizes come
+ * from the surface module -- see pvz2_touch_space_width for why the numerator
+ * deliberately does NOT follow the window. */
+static int to_render_x(int x) {
+    const unsigned w = pvz2_surface_width();
+    return w > 0 ? (int)((unsigned)x * pvz2_touch_space_width() / w) : x;
+}
+static int to_render_y(int y) {
+    const unsigned h = pvz2_surface_height();
+    return h > 0 ? (int)((unsigned)y * pvz2_touch_space_height() / h) : y;
+}
 
 /* Turns one SDL event into a guest input event.
  *
@@ -96,26 +100,21 @@ static int g_fullscreen = 0;
  * it is alive); once 1 the title shows the live FPS instead. */
 static int g_booted = 0;
 
-/* Re-reads the window's drawable size and re-renders the game at it: the
- * compositor is told the new size immediately (so THIS frame already fills the
- * window), and the engine re-runs onSurfaceChanged so it re-fits its projection.
+/* Re-reads the window's drawable size and re-renders the game at it. Publishing
+ * the size is immediate, so THIS frame already fills the window and the touch
+ * mapping is right straight away; only re-running onSurfaceChanged is deferred to
+ * the frame thread, because it is a guest call.
  *
- * Note what is deliberately NOT updated here: g_render_w/h. The engine's TOUCH
- * coordinate space is frozen at the launch resolution (pvz2_render_size) --
- * onSurfaceChanged updates the projection but the touch scaler keys off
- * mOrigScreenWidth, which SetWidthHeight sets once at startup and the resize
- * path never revisits. So input must always map window pixels back into that
- * fixed space; making g_render track the window (identity) put every click in
- * the wrong place. g_render stays at the launch size and to_render_* rescales. */
+ * The touch space is deliberately NOT moved -- pvz2_surface_set freezes it at the
+ * launch size on its first call, which is the whole reason that rule lives in the
+ * surface module instead of here. */
 static void update_window_size(void) {
     if (!g_window) return;
     int dw = 0, dh = 0;
     SDL_GL_GetDrawableSize(g_window, &dw, &dh);
     if (dw > 0 && dh > 0) {
-        g_win_w = dw;
-        g_win_h = dh;
-        pvz2_set_drawable_size(dw, dh);
-        pvz2_session_request_resize(dw, dh);
+        pvz2_surface_set((uint32_t)dw, (uint32_t)dh);
+        pvz2_session_request_resize();
     }
 }
 
@@ -223,11 +222,31 @@ static void host_pump(void) {
      * draining the message queue is all that is needed to keep it alive. */
 }
 
-int main(int argc, char **argv) {
-    parse_game_parameters(argc, argv);
+/* There are no configuration flags: config.ini next to the executable is the
+ * single source of truth, and it documents itself (it is written on first run
+ * with every switch at its default). This exists so `--help` says that, rather
+ * than the older behaviour of accepting --game/--home and silently ignoring
+ * them -- nothing had read those two since the harness moved to config.ini. */
+static void print_usage(const char *argv0) {
+    printf("%s\n", argv0);
+    printf("\n");
+    printf("No command-line options. Everything is configured through config.ini\n");
+    printf("in the same folder as the executable; it is created on first run with\n");
+    printf("every setting at its default and a comment explaining each one.\n");
+    printf("\n");
+    printf("  [paths] so, obb, save     where the game data lives\n");
+    printf("  [video] mode, fps_limit   launch resolution and frame cap\n");
+    printf("  [game]  user_locale       which language the engine loads\n");
+    printf("  [log]   input, verbose    diagnostics\n");
+}
 
-    printf("pvz2native skeleton build OK\n");
-    printf("game_path=%s home_path=%s\n", game_parameters.game_path, game_parameters.home_path);
+int main(int argc, char **argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        }
+    }
 
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         printf("SDL_Init failed: %s\n", SDL_GetError());
@@ -250,7 +269,7 @@ int main(int argc, char **argv) {
      * Java-side GLSurfaceView owns EGL context creation and the native side
      * just receives an already-current context in onSurfaceCreated. SDL's
      * GL context here plays that same role. GL2.0 compatibility profile
-     * (matches gles_compat's `glad_add_library` config) keeps both the
+     * (matches the root CMakeLists' `glad_add_library` config) keeps both the
      * fixed-function pipeline (matrix stack, client-state arrays) GLES1.1
      * code needs and the shader entry points GLES2 code needs. */
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
@@ -259,19 +278,17 @@ int main(int argc, char **argv) {
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 
     /* The launch resolution, resolved from [video] (auto-aspect by default) and
-     * the display -- see gfx/video_mode. The engine renders AT this size and the
-     * touch space is frozen to it; the window stays freely resizable and
-     * update_window_size re-fits the engine on any later resize. pvz2_set_render_size
-     * has to run before pvz2_session_start so the guest surface starts here too. */
-    int start_fullscreen = 0;
-    pvz2_choose_window_size(&g_render_w, &g_render_h, &start_fullscreen);
-    pvz2_set_render_size(g_render_w, g_render_h);
-    g_win_w = g_render_w;
-    g_win_h = g_render_h;
-    printf("video: launching at %dx%d%s\n", g_render_w, g_render_h,
+     * the display -- see gfx/video_mode. This first pvz2_surface_set is also what
+     * freezes the touch space, and it has to happen before pvz2_session_start so
+     * the guest surface starts at the same size. The window stays freely resizable
+     * and update_window_size re-fits the engine on any later resize. */
+    int launch_w = 0, launch_h = 0, start_fullscreen = 0;
+    pvz2_choose_window_size(&launch_w, &launch_h, &start_fullscreen);
+    pvz2_surface_set((uint32_t)launch_w, (uint32_t)launch_h);
+    printf("video: launching at %dx%d%s\n", launch_w, launch_h,
            start_fullscreen ? " (fullscreen)" : "");
     SDL_Window *window = SDL_CreateWindow("PvZ2Native", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                           g_render_w, g_render_h,
+                                           launch_w, launch_h,
                                            SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!window) {
         printf("SDL_CreateWindow failed: %s\n", SDL_GetError());

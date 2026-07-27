@@ -31,7 +31,10 @@
 
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <mutex>
+
+#include <pvz2native/dependencies/libc_internal.h>
 
 namespace pvz2native {
 namespace {
@@ -125,18 +128,10 @@ void c_localeconv(GuestCall &c) {
     c.set_result(block);
 }
 
-/* Collation in the C locale is plain byte (or wchar) order, so strcoll is
- * strcmp and strxfrm is a copy. */
-void c_strcoll(GuestCall &c) {
-    std::uint32_t a = c.arg(0), b = c.arg(1);
-    int result = 0;
-    for (std::uint32_t i = 0;; ++i) {
-        std::uint8_t ca = c.read8(a + i), cb = c.read8(b + i);
-        if (ca != cb) { result = (int)ca - (int)cb; break; }
-        if (ca == 0) break;
-    }
-    c.set_result((std::uint32_t)result);
-}
+/* Collation in the C locale is plain byte (or wchar) order, so strcoll IS strcmp
+ * and strxfrm is a copy. Sharing the loop rather than restating it means the
+ * "is" in that sentence is enforced instead of merely intended. */
+void c_strcoll(GuestCall &c) { libc::compare_bytes(c, libc::kUnbounded, true, false); }
 
 void c_strxfrm(GuestCall &c) {
     std::uint32_t dst = c.arg(0), src = c.arg(1), n = c.arg(2), len = 0;
@@ -145,16 +140,7 @@ void c_strxfrm(GuestCall &c) {
     c.set_result(len);
 }
 
-void c_wcscoll(GuestCall &c) {
-    std::uint32_t a = c.arg(0), b = c.arg(1);
-    int result = 0;
-    for (std::uint32_t i = 0;; ++i) {
-        std::uint32_t ca = c.read32(a + i * 4), cb = c.read32(b + i * 4);
-        if (ca != cb) { result = ca < cb ? -1 : 1; break; }
-        if (ca == 0) break;
-    }
-    c.set_result((std::uint32_t)result);
-}
+void c_wcscoll(GuestCall &c) { libc::compare_wide(c, libc::kUnbounded, true); }
 
 void c_wcsxfrm(GuestCall &c) {
     std::uint32_t dst = c.arg(0), src = c.arg(1), n = c.arg(2), i = 0;
@@ -201,6 +187,33 @@ void initialize_data_imports(pvz2_elf_image_t *img, GuestRuntime *rt) {
             rt->host_files[addr + 0 * kSizeofFILE] = stdin;
             rt->host_files[addr + 1 * kSizeofFILE] = stdout;
             rt->host_files[addr + 2 * kSizeofFILE] = stderr;
+        } else if (std::strcmp(name, "timezone") == 0) {
+            /* bionic's `long timezone`: seconds WEST of UTC. New in 9.6.1.
+             *
+             * Taken from the host rather than left at the zero the block starts
+             * as, because this module's localtime() is the host's -- reporting
+             * UTC here while localtime returns local time would make any caller
+             * that reconstructs a UTC timestamp from the two disagree with
+             * itself by the offset. */
+            const std::time_t probe = 0;
+            std::tm utc{};
+            std::tm local{};
+#if defined(_WIN32)
+            gmtime_s(&utc, &probe);
+            localtime_s(&local, &probe);
+#else
+            gmtime_r(&probe, &utc);
+            localtime_r(&probe, &local);
+#endif
+            /* The probe is the epoch, so local time may land on the previous or
+             * next day -- and across a month boundary tm_mday jumps by ~30, not
+             * by 1. Normalise the difference to -1/0/+1 before scaling it. */
+            int day_diff = local.tm_mday - utc.tm_mday;
+            if (day_diff > 1) day_diff = -1;
+            else if (day_diff < -1) day_diff = 1;
+            const long east = day_diff * 86400 + (local.tm_hour - utc.tm_hour) * 3600 +
+                              (local.tm_min - utc.tm_min) * 60;
+            put32(img, addr, (std::uint32_t)(std::int32_t)(-east));
         } else {
             /* The five OpenSLES SL_IID_* ids need distinct, non-zero values or
              * GetInterface cannot tell them apart -- see libopensles.cpp. */

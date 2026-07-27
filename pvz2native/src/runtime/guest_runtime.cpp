@@ -91,4 +91,11 @@ GuestSem *GuestRuntime::get_or_create_sem(uint32_t addr) {
     return slot.get();
 }
 
+GuestRwLock *GuestRuntime::get_or_create_rwlock(uint32_t addr) {
+    std::lock_guard<std::mutex> lock(rwlocks_lock);
+    auto &slot = guest_rwlocks[addr];
+    if (!slot) slot = std::make_unique<GuestRwLock>();
+    return slot.get();
+}
+
 }  // namespace pvz2native

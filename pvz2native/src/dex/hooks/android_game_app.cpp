@@ -502,7 +502,9 @@ void open_url(DexCall &d) {
  *
  * These end up in save files, analytics payloads and the version display. */
 void product_version(DexCall &d) { d.ret_string("1"); }
-void product_version_string(DexCall &d) { d.ret_string("1.6.2"); }
+
+// hardcoded
+void product_version_string(DexCall &d) { d.ret_string(""); }
 void currency_symbol(DexCall &d) { d.ret_string("$"); }
 /* Info_SysGetUserCurrencyCode -- the ISO 4217 code (e.g. "USD"). Unhooked it
  * returned null, and the in-app store treats a null currency as "store not

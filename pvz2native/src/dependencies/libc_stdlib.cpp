@@ -270,6 +270,11 @@ void register_libc_stdlib(ImportTable &t) {
 
     t.add("strtoll", c_strtoll);
     t.add("strtoull", c_strtoull);
+    /* intmax_t is 64 bits on armeabi-v7a, so these ARE strtoll/strtoull -- the
+     * same function under the <inttypes.h> spelling. Routing them to the 32-bit
+     * strtol instead would silently halve any large value. */
+    t.add("strtoimax", c_strtoll);
+    t.add("strtoumax", c_strtoull);
     t.add("getenv", c_getenv);
     t.add("setenv", c_setenv);
     t.add("unsetenv", c_unsetenv);

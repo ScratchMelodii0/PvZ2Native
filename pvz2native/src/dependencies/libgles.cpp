@@ -3,21 +3,25 @@
  * PvZ2 uses BOTH: fixed-function GLES1 calls (glMatrixMode, glLoadMatrixf,
  * glShadeModel, glTexCoordPointer) alongside the GLES2 shader pipeline, which
  * is why the host context is a desktop GL compatibility profile rather than a
- * pure ES one. The bodies forward to gles_compat.c's gl_* wrappers, which is
- * where any real translation work lives.
+ * pure ES one.
  *
- * Moved verbatim out of the old monolithic dispatch chain; only the accessors
- * were renamed onto GuestCall.
+ * Each handler unpacks the guest registers and calls the host GL entry point
+ * directly. There used to be a gfx/gles_compat layer in between: 114 functions
+ * of which 112 were `gl_bind_texture(t,x) { glBindTexture(t,x); }` -- a rename
+ * and nothing more -- so following a GL call meant hopping through a file that
+ * never did any work, and 41 of those wrappers were never called at all. The
+ * two that looked like translation only cast float to double, which the
+ * compiler already does at the call site. Desktop GL IS the translation target
+ * here; the only genuine ES-vs-desktop work in this port is the GLSL dialect
+ * rewrite (see gl_glShaderSource) and the viewport fix (see gl_glViewport).
  */
 
 #include <pvz2native/dependencies/dependency.h>
 #include <pvz2native/config.h>
 #include <pvz2native/gfx/gl_requirements.h>
+#include <pvz2native/surface.h>
 
-/* gles_compat.c is C; its symbols have C linkage. */
-extern "C" {
-#include <pvz2native/gfx/gles_compat.h>
-}
+#include <glad/gl.h>
 
 #include <array>
 #include <atomic>
@@ -34,10 +38,6 @@ extern "C" {
 namespace pvz2native {
 namespace {
 
-/* Set once at startup from the SDL window size -- see set_drawable_size. */
-std::atomic<std::uint32_t> g_drawable_w{0};
-std::atomic<std::uint32_t> g_drawable_h{0};
-
 /* Which framebuffer the guest currently has bound. The engine renders its scene
  * into an offscreen FBO at its fixed resolution, then binds framebuffer 0 -- the
  * window -- to composite. Tracking this lets gl_glViewport force the composite
@@ -50,7 +50,7 @@ std::atomic<GLuint> g_bound_fbo{0};
  * itself. Budgeted, so a per-frame error cannot flood the log. */
 void report_gl_error(GuestCall &c, const char *what) {
     static std::atomic<std::uint32_t> budget{24};
-    GLenum err = gl_get_error();
+    GLenum err = glGetError();
     if (err == GL_NO_ERROR) return;
     if (budget.load(std::memory_order_relaxed) == 0) return;
     budget.fetch_sub(1, std::memory_order_relaxed);
@@ -61,7 +61,7 @@ void report_gl_error(GuestCall &c, const char *what) {
  * full state dump. Kept separate because it must not consume the error queue
  * silently once the report budget runs out. */
 bool gl_peek_error_for_draw(GuestCall &c, const char *what) {
-    GLenum err = gl_get_error();
+    GLenum err = glGetError();
     if (err == GL_NO_ERROR) return false;
     static std::atomic<std::uint32_t> budget{24};
     if (budget.load(std::memory_order_relaxed) > 0) {
@@ -72,7 +72,7 @@ bool gl_peek_error_for_draw(GuestCall &c, const char *what) {
 }
 
 void gl_glActiveTexture(GuestCall &c) {
-            gl_active_texture(c.arg(0));
+    glActiveTexture(c.arg(0));
 }
 
 /* [gl] debug_clear=1 forces a loud clear colour. The engine clears to opaque
@@ -476,7 +476,7 @@ void gl_glDrawArrays(GuestCall &c) {
      * draw -- and the draw-state dump would then describe perfectly valid
      * state, which is misleading rather than merely useless. */
     {
-        GLenum stale = gl_get_error();
+        GLenum stale = glGetError();
         if (stale != GL_NO_ERROR) {
             static std::atomic<std::uint32_t> budget{6};
             if (budget.load(std::memory_order_relaxed) > 0) {
@@ -487,7 +487,7 @@ void gl_glDrawArrays(GuestCall &c) {
         }
     }
     log_gl_step(c, "glDrawArrays first,count", (int)c.arg(1), (int)c.arg(2));
-    gl_draw_arrays(c.arg(0), c.arg(1), c.arg(2));
+    glDrawArrays(c.arg(0), c.arg(1), c.arg(2));
     if (gl_peek_error_for_draw(c, "glDrawArrays")) dump_draw_state(c);
 
     /* What the composite actually PUT on the window.
@@ -526,7 +526,7 @@ void gl_glDrawArrays(GuestCall &c) {
 }
 
 void gl_glDrawElements(GuestCall &c) {
-    gl_draw_elements(c.arg(0), c.arg(1), c.arg(2), c.ptr(c.arg(3)));
+    glDrawElements(c.arg(0), c.arg(1), c.arg(2), c.ptr(c.arg(3)));
     report_gl_error(c, "glDrawElements");
 }
 
@@ -550,8 +550,8 @@ void gl_glViewport(GuestCall &c) {
      * menu's textures do load, which makes the substitution worth having.
      * [gl] no_viewport_fix=1 restores the uncorrected behaviour. */
     const bool disabled = pvz2_config()->gl_no_viewport_fix != 0;
-    const std::uint32_t dw = g_drawable_w.load(std::memory_order_relaxed);
-    const std::uint32_t dh = g_drawable_h.load(std::memory_order_relaxed);
+    const std::uint32_t dw = pvz2_surface_width();
+    const std::uint32_t dh = pvz2_surface_height();
     const bool have_drawable = !disabled && dw != 0 && dh != 0;
 
     /* Any viewport on framebuffer 0 is a composite to the window, and it must
@@ -584,19 +584,19 @@ void gl_glViewport(GuestCall &c) {
         }
         if (have_drawable) { x = 0; y = 0; w = dw; h = dh; }
     }
-    gl_viewport(x, y, w, h);
+    glViewport(x, y, w, h);
 }
 
 void gl_glAlphaFunc(GuestCall &c) {
-            gl_alpha_func(c.arg(0), c.argf(1));
+    glAlphaFunc(c.arg(0), c.argf(1));
 }
 
 void gl_glAttachShader(GuestCall &c) {
-            gl_attach_shader(c.arg(0), c.arg(1));
+    glAttachShader(c.arg(0), c.arg(1));
 }
 
 void gl_glBindAttribLocation(GuestCall &c) {
-            gl_bind_attrib_location(c.arg(0), c.arg(1), (const GLchar *)c.ptr(c.arg(2)));
+    glBindAttribLocation(c.arg(0), c.arg(1), (const GLchar *)c.ptr(c.arg(2)));
 }
 
 /* Reports what an offscreen framebuffer actually contains, at the moment the
@@ -666,85 +666,82 @@ void gl_glBindFramebuffer(GuestCall &c) {
         if (current != 0) probe_framebuffer_contents(c, (GLuint)current);
     }
     g_bound_fbo.store((GLuint)c.arg(1), std::memory_order_relaxed);
-    gl_bind_framebuffer(c.arg(0), c.arg(1));
+    glBindFramebuffer(c.arg(0), c.arg(1));
 }
 
 void gl_glBindTexture(GuestCall &c) {
-            gl_bind_texture(c.arg(0), c.arg(1));
+    glBindTexture(c.arg(0), c.arg(1));
 }
 
 void gl_glBlendFunc(GuestCall &c) {
-            gl_blend_func(c.arg(0), c.arg(1));
+    glBlendFunc(c.arg(0), c.arg(1));
 }
 
 void gl_glCheckFramebufferStatus(GuestCall &c) {
-            c.regs[0] = gl_check_framebuffer_status(c.arg(0));
+    c.regs[0] = glCheckFramebufferStatus(c.arg(0));
 }
 
 void gl_glClear(GuestCall &c) {
     log_gl_step(c, "glClear mask", (int)c.arg(0), 0);
-            gl_clear(c.arg(0));
+    glClear(c.arg(0));
 }
 
 void gl_glClearColor(GuestCall &c) {
     if (debug_clear_enabled()) {
-        gl_clear_color(0.2f, 0.0f, 0.6f, 1.0f); /* purple: nothing in the game is this colour */
+        glClearColor(0.2f, 0.0f, 0.6f, 1.0f); /* purple: nothing in the game is this colour */
         return;
     }
-    gl_clear_color(c.argf(0), c.argf(1), c.argf(2), c.argf(3));
+    glClearColor(c.argf(0), c.argf(1), c.argf(2), c.argf(3));
 }
 
 void gl_glClearDepthf(GuestCall &c) {
-            gl_clear_depth_f(c.argf(0));
+    glClearDepthf(c.argf(0));
 }
 
 void gl_glClientActiveTexture(GuestCall &c) {
-            gl_client_active_texture(c.arg(0));
+    glClientActiveTexture(c.arg(0));
 }
 
 void gl_glColorMask(GuestCall &c) {
-            gl_color_mask((GLboolean)c.arg(0), (GLboolean)c.arg(1), (GLboolean)c.arg(2), (GLboolean)c.arg(3));
+    glColorMask((GLboolean)c.arg(0), (GLboolean)c.arg(1), (GLboolean)c.arg(2), (GLboolean)c.arg(3));
 }
 
 void gl_glColorPointer(GuestCall &c) {
-            gl_color_pointer(c.arg(0), c.arg(1), c.arg(2), c.ptr(c.arg(3)));
+    glColorPointer(c.arg(0), c.arg(1), c.arg(2), c.ptr(c.arg(3)));
 }
 
 void gl_glCompileShader(GuestCall &c) {
-            GLuint shader = c.arg(0);
-            gl_compile_shader(shader);
-            /* The engine's shaders are GLSL ES 1.00 and the host context is
-             * desktop GL, which rejects them unless the driver accepts ES
-             * syntax. The engine never reads the info log, so a rejected
-             * shader would silently produce a black screen with draw calls
-             * still being issued -- exactly the symptom. Report it here. */
-            {
-                GLint status = 0;
-                gl_get_shader_i_v(shader, GL_COMPILE_STATUS, &status);
-                if (status != GL_TRUE) {
-                    GLchar log[1024] = {0};
-                    GLsizei len = 0;
-                    gl_get_shader_info_log(shader, (GLsizei)sizeof(log) - 1, &len, log);
-                    std::lock_guard<std::mutex> lg(c.rt->log_lock);
-                    std::printf("pvz2: [gl] SHADER %u FAILED TO COMPILE: %s\n", shader, log);
-                }
-            }
+    GLuint shader = c.arg(0);
+    glCompileShader(shader);
+    /* The engine's shaders are GLSL ES 1.00 and the host context is desktop GL,
+     * which rejects them unless the driver accepts ES syntax. The engine never
+     * reads the info log, so a rejected shader would silently produce a black
+     * screen with draw calls still being issued -- exactly the symptom. */
+    GLint status = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+    if (status != GL_TRUE) {
+        GLchar log[1024] = {0};
+        GLsizei len = 0;
+        glGetShaderInfoLog(shader, (GLsizei)sizeof(log) - 1, &len, log);
+        std::lock_guard<std::mutex> lg(c.rt->log_lock);
+        std::printf("pvz2: [gl] SHADER %u FAILED TO COMPILE: %s\n", shader, log);
+    }
 }
 
 void gl_glLinkProgram(GuestCall &c) {
-            GLuint program = c.arg(0);
-            gl_link_program(program);
-            {
-                GLint status = 0;
-                gl_get_program_i_v(program, GL_LINK_STATUS, &status);
-                if (status != GL_TRUE) {
-                    GLchar log[1024] = {0};
-                    GLsizei len = 0;
-                    gl_get_program_info_log(program, (GLsizei)sizeof(log) - 1, &len, log);
-                    std::lock_guard<std::mutex> lg(c.rt->log_lock);
-                    std::printf("pvz2: [gl] PROGRAM %u FAILED TO LINK: %s\n", program, log);
-                }
-            }
+    GLuint program = c.arg(0);
+    glLinkProgram(program);
+    /* Same reasoning as gl_glCompileShader: the engine never checks, so a failed
+     * link is otherwise invisible and reads as a black screen. */
+    GLint status = 0;
+    glGetProgramiv(program, GL_LINK_STATUS, &status);
+    if (status != GL_TRUE) {
+        GLchar log[1024] = {0};
+        GLsizei len = 0;
+        glGetProgramInfoLog(program, (GLsizei)sizeof(log) - 1, &len, log);
+        std::lock_guard<std::mutex> lg(c.rt->log_lock);
+        std::printf("pvz2: [gl] PROGRAM %u FAILED TO LINK: %s\n", program, log);
+    }
 }
 
 /* --- ETC1 software decode -------------------------------------------------
@@ -873,7 +870,7 @@ void log_compressed_support_once(GuestCall &c) {
     if (n > 128) n = 128;
     std::vector<GLint> formats((std::size_t)n, 0);
     if (n > 0) glGetIntegerv(0x86A3 /* GL_COMPRESSED_TEXTURE_FORMATS */, formats.data());
-    const GLubyte *renderer = gl_get_string(0x1F01 /* GL_RENDERER */);
+    const GLubyte *renderer = glGetString(0x1F01 /* GL_RENDERER */);
     c.log("[gl] host renderer: %s", renderer ? (const char *)renderer : "?");
     c.log("[gl] host advertises %d compressed texture format(s):", (int)n);
     for (GLint i = 0; i < n; ++i) {
@@ -882,230 +879,228 @@ void log_compressed_support_once(GuestCall &c) {
 }
 
 void gl_glCompressedTexImage2D(GuestCall &c) {
-            const GLenum internalformat = (GLenum)c.arg(2);
-            const GLsizei width = (GLsizei)c.arg(3);
-            const GLsizei height = (GLsizei)c.arg(4);
+    const GLenum internalformat = (GLenum)c.arg(2);
+    const GLsizei width = (GLsizei)c.arg(3);
+    const GLsizei height = (GLsizei)c.arg(4);
 
-            log_compressed_support_once(c);
-            /* Name each distinct format the engine uploads once, so we see the
-             * working set without a per-texture flood. */
-            {
-                static std::mutex fmt_lock;
-                static std::set<GLenum> seen;
-                bool first;
-                {
-                    std::lock_guard<std::mutex> lk(fmt_lock);
-                    first = seen.insert(internalformat).second;
-                }
-                if (first) {
-                    c.log("[gl] engine uploads compressed format 0x%04x %s (first seen %dx%d)",
-                          (unsigned)internalformat, compressed_format_name(internalformat),
-                          (int)width, (int)height);
-                }
-            }
+    log_compressed_support_once(c);
+    /* Name each distinct format the engine uploads once, so we see the working
+     * set without a per-texture flood. */
+    {
+        static std::mutex fmt_lock;
+        static std::set<GLenum> seen;
+        bool first;
+        {
+            std::lock_guard<std::mutex> lk(fmt_lock);
+            first = seen.insert(internalformat).second;
+        }
+        if (first) {
+            c.log("[gl] engine uploads compressed format 0x%04x %s (first seen %dx%d)",
+                  (unsigned)internalformat, compressed_format_name(internalformat), (int)width,
+                  (int)height);
+        }
+    }
 
-            const GLint level = (GLint)c.arg(1);
-            const GLsizei imageSize = (GLsizei)c.arg(6);
-            const void *data = c.ptr(c.arg(7));
+    const GLint level = (GLint)c.arg(1);
+    const GLsizei imageSize = (GLsizei)c.arg(6);
+    const void *data = c.ptr(c.arg(7));
 
-            /* ETC1: decode to RGB8 on the CPU and upload uncompressed, so it no
-             * longer matters whether this driver exposes ETC1/ETC2 at all. Every
-             * non-RGBA PvZ2 texture takes this path -- backgrounds, plants, the
-             * lot -- and passing ETC1 straight through is exactly what left them
-             * black on drivers that reject the format. A per-thread scratch
-             * buffer avoids re-allocating a few MB on every texture; GL runs on
-             * one thread, but thread_local costs nothing and is safe regardless. */
-            if (internalformat == 0x8D64 /* GL_ETC1_RGB8_OES */) {
-                static thread_local std::vector<std::uint8_t> rgb;
-                if (etc1_decode((const std::uint8_t *)data, imageSize, width, height, rgb)) {
-                    gl_tex_image_2_d(c.arg(0), level, 0x8051 /* GL_RGB8 */, width, height, 0,
-                                     0x1907 /* GL_RGB */, 0x1401 /* GL_UNSIGNED_BYTE */, rgb.data());
-                    report_gl_error(c, "glTexImage2D(ETC1->RGB8)");
-                    return;
-                }
-                /* Undersized source -- fall through to the raw upload, which at
-                 * worst reproduces the old behaviour rather than reading OOB. */
-            }
+    /* ETC1: decode to RGB8 on the CPU and upload uncompressed, so it no longer
+     * matters whether this driver exposes ETC1/ETC2 at all. Every non-RGBA PvZ2
+     * texture takes this path -- backgrounds, plants, the lot -- and passing ETC1
+     * straight through is exactly what left them black on drivers that reject the
+     * format. A per-thread scratch buffer avoids re-allocating a few MB on every
+     * texture; GL runs on one thread, but thread_local costs nothing anyway. */
+    if (internalformat == 0x8D64 /* GL_ETC1_RGB8_OES */) {
+        static thread_local std::vector<std::uint8_t> rgb;
+        if (etc1_decode((const std::uint8_t *)data, imageSize, width, height, rgb)) {
+            glTexImage2D(c.arg(0), level, 0x8051 /* GL_RGB8 */, width, height, 0,
+                         0x1907 /* GL_RGB */, 0x1401 /* GL_UNSIGNED_BYTE */, rgb.data());
+            report_gl_error(c, "glTexImage2D(ETC1->RGB8)");
+            return;
+        }
+        /* Undersized source -- fall through to the raw upload, which at worst
+         * reproduces the old behaviour rather than reading OOB. */
+    }
 
-            gl_compressed_tex_image_2_d(c.arg(0), level, internalformat, width, height, c.arg(5),
-                                        imageSize, data);
+    glCompressedTexImage2D(c.arg(0), level, internalformat, width, height, c.arg(5), imageSize,
+                           data);
 
-            /* Did the driver accept it? A GL_INVALID_ENUM here is the whole bug:
-             * the format is not supported and this texture is now black. */
-            report_gl_error(c, "glCompressedTexImage2D");
+    /* Did the driver accept it? A GL_INVALID_ENUM here is the whole bug: the
+     * format is not supported and this texture is now black. */
+    report_gl_error(c, "glCompressedTexImage2D");
 }
 
 void gl_glCreateProgram(GuestCall &c) {
-            c.regs[0] = gl_create_program();
+    c.regs[0] = glCreateProgram();
 }
 
 void gl_glCreateShader(GuestCall &c) {
-            c.regs[0] = gl_create_shader(c.arg(0));
+    c.regs[0] = glCreateShader(c.arg(0));
 }
 
 void gl_glCullFace(GuestCall &c) {
-            gl_cull_face(c.arg(0));
+    glCullFace(c.arg(0));
 }
 
 void gl_glDeleteFramebuffers(GuestCall &c) {
-            gl_delete_framebuffers(c.arg(0), (GLuint *)c.ptr(c.arg(1)));
+    glDeleteFramebuffers(c.arg(0), (GLuint *)c.ptr(c.arg(1)));
 }
 
 void gl_glDeleteProgram(GuestCall &c) {
-            gl_delete_program(c.arg(0));
+    glDeleteProgram(c.arg(0));
 }
 
 void gl_glDeleteShader(GuestCall &c) {
-            gl_delete_shader(c.arg(0));
+    glDeleteShader(c.arg(0));
 }
 
 void gl_glDeleteTextures(GuestCall &c) {
-            gl_delete_textures(c.arg(0), (const GLuint *)c.ptr(c.arg(1)));
+    glDeleteTextures(c.arg(0), (const GLuint *)c.ptr(c.arg(1)));
 }
 
 void gl_glDepthFunc(GuestCall &c) {
-            gl_depth_func(c.arg(0));
+    glDepthFunc(c.arg(0));
 }
 
 void gl_glDepthMask(GuestCall &c) {
-            gl_depth_mask((GLboolean)c.arg(0));
+    glDepthMask((GLboolean)c.arg(0));
 }
 
 void gl_glDepthRangef(GuestCall &c) {
-            gl_depth_range_f(c.argf(0), c.argf(1));
+    glDepthRange(c.argf(0), c.argf(1));
 }
 
 void gl_glDisable(GuestCall &c) {
-            gl_disable(c.arg(0));
+    glDisable(c.arg(0));
 }
 
 void gl_glDisableClientState(GuestCall &c) {
-            gl_disable_client_state(c.arg(0));
+    glDisableClientState(c.arg(0));
 }
 
 void gl_glDisableVertexAttribArray(GuestCall &c) {
-            gl_disable_vertex_attrib_array(c.arg(0));
+    glDisableVertexAttribArray(c.arg(0));
 }
 
 void gl_glEnable(GuestCall &c) {
-            gl_enable(c.arg(0));
+    glEnable(c.arg(0));
 }
 
 void gl_glEnableClientState(GuestCall &c) {
-            gl_enable_client_state(c.arg(0));
+    glEnableClientState(c.arg(0));
 }
 
 void gl_glEnableVertexAttribArray(GuestCall &c) {
-            gl_enable_vertex_attrib_array(c.arg(0));
+    glEnableVertexAttribArray(c.arg(0));
 }
 
 void gl_glFramebufferTexture2D(GuestCall &c) {
-            gl_framebuffer_texture_2_d(c.arg(0), c.arg(1), c.arg(2), c.arg(3), c.arg(4));
+    glFramebufferTexture2D(c.arg(0), c.arg(1), c.arg(2), c.arg(3), c.arg(4));
 }
 
 void gl_glFrontFace(GuestCall &c) {
-            gl_front_face(c.arg(0));
+    glFrontFace(c.arg(0));
 }
 
 void gl_glGenFramebuffers(GuestCall &c) {
-            gl_gen_framebuffers(c.arg(0), (GLuint *)c.ptr(c.arg(1)));
+    glGenFramebuffers(c.arg(0), (GLuint *)c.ptr(c.arg(1)));
 }
 
 void gl_glGenTextures(GuestCall &c) {
-            gl_gen_textures(c.arg(0), (GLuint *)c.ptr(c.arg(1)));
+    glGenTextures(c.arg(0), (GLuint *)c.ptr(c.arg(1)));
 }
 
 void gl_glGetError(GuestCall &c) {
-            c.regs[0] = gl_get_error();
+    c.regs[0] = glGetError();
 }
 
 void gl_glGetIntegerv(GuestCall &c) {
-            gl_get_integer_v(c.arg(0), (GLint *)c.ptr(c.arg(1)));
+    glGetIntegerv(c.arg(0), (GLint *)c.ptr(c.arg(1)));
 }
 
 void gl_glGetProgramInfoLog(GuestCall &c) {
-            gl_get_program_info_log(c.arg(0), c.arg(1), (GLsizei *)c.ptr(c.arg(2)), (GLchar *)c.ptr(c.arg(3)));
+    glGetProgramInfoLog(c.arg(0), c.arg(1), (GLsizei *)c.ptr(c.arg(2)), (GLchar *)c.ptr(c.arg(3)));
 }
 
 void gl_glGetProgramiv(GuestCall &c) {
-            gl_get_program_i_v(c.arg(0), c.arg(1), (GLint *)c.ptr(c.arg(2)));
+    glGetProgramiv(c.arg(0), c.arg(1), (GLint *)c.ptr(c.arg(2)));
 }
 
 void gl_glGetShaderInfoLog(GuestCall &c) {
-            gl_get_shader_info_log(c.arg(0), c.arg(1), (GLsizei *)c.ptr(c.arg(2)), (GLchar *)c.ptr(c.arg(3)));
+    glGetShaderInfoLog(c.arg(0), c.arg(1), (GLsizei *)c.ptr(c.arg(2)), (GLchar *)c.ptr(c.arg(3)));
 }
 
 void gl_glGetShaderiv(GuestCall &c) {
-            gl_get_shader_i_v(c.arg(0), c.arg(1), (GLint *)c.ptr(c.arg(2)));
+    glGetShaderiv(c.arg(0), c.arg(1), (GLint *)c.ptr(c.arg(2)));
 }
 
 void gl_glGetString(GuestCall &c) {
-            const GLubyte *s = gl_get_string(c.arg(0));
-            const char *cs = s ? (const char *)s : "";
-            uint32_t len = (uint32_t)std::strlen(cs) + 1;
-            uint32_t addr = c.rt->heap.alloc(len);
-            /* A driver string, not guest memory -- must be copied into the
-             * guest's own address space before handing its address back,
-             * unlike every other pointer here which already lives in
-             * c.img->mem and can be passed through as-is. */
-            if (addr) std::memcpy(&c.img->mem[addr], cs, len);
-            c.regs[0] = addr;
+    const GLubyte *s = glGetString(c.arg(0));
+    const char *cs = s ? (const char *)s : "";
+    uint32_t len = (uint32_t)std::strlen(cs) + 1;
+    uint32_t addr = c.rt->heap.alloc(len);
+    /* A driver string, not guest memory -- must be copied into the guest's own
+     * address space before handing its address back, unlike every other pointer
+     * here which already lives in c.img->mem and can be passed through as-is. */
+    if (addr) std::memcpy(&c.img->mem[addr], cs, len);
+    c.regs[0] = addr;
 }
 
 void gl_glIsProgram(GuestCall &c) {
-            c.regs[0] = gl_is_program(c.arg(0));
+    c.regs[0] = glIsProgram(c.arg(0));
 }
 
 void gl_glIsShader(GuestCall &c) {
-            c.regs[0] = gl_is_shader(c.arg(0));
+    c.regs[0] = glIsShader(c.arg(0));
 }
 
 void gl_glIsTexture(GuestCall &c) {
-            c.regs[0] = gl_is_texture(c.arg(0));
+    c.regs[0] = glIsTexture(c.arg(0));
 }
 
 void gl_glLineWidth(GuestCall &c) {
-            gl_line_width(c.argf(0));
+    glLineWidth(c.argf(0));
 }
 
 void gl_glLoadIdentity(GuestCall &c) {
-            gl_load_identity();
+    glLoadIdentity();
 }
 
 void gl_glLoadMatrixf(GuestCall &c) {
-            gl_load_matrix_f((const GLfloat *)c.ptr(c.arg(0)));
+    glLoadMatrixf((const GLfloat *)c.ptr(c.arg(0)));
 }
 
 void gl_glMatrixMode(GuestCall &c) {
-            gl_matrix_mode(c.arg(0));
+    glMatrixMode(c.arg(0));
 }
 
 void gl_glNormalPointer(GuestCall &c) {
-            gl_normal_pointer(c.arg(0), c.arg(1), c.ptr(c.arg(2)));
+    glNormalPointer(c.arg(0), c.arg(1), c.ptr(c.arg(2)));
 }
 
 void gl_glPixelStorei(GuestCall &c) {
-            gl_pixel_storei(c.arg(0), c.arg(1));
+    glPixelStorei(c.arg(0), c.arg(1));
 }
 
 void gl_glPopMatrix(GuestCall &c) {
-            gl_pop_matrix();
+    glPopMatrix();
 }
 
 void gl_glPushMatrix(GuestCall &c) {
-            gl_push_matrix();
+    glPushMatrix();
 }
 
 void gl_glScalef(GuestCall &c) {
-            gl_scale_f(c.argf(0), c.argf(1), c.argf(2));
+    glScalef(c.argf(0), c.argf(1), c.argf(2));
 }
 
 void gl_glScissor(GuestCall &c) {
-            gl_scissor(c.arg(0), c.arg(1), c.arg(2), c.arg(3));
+    glScissor(c.arg(0), c.arg(1), c.arg(2), c.arg(3));
 }
 
 void gl_glShadeModel(GuestCall &c) {
-            gl_shade_model(c.arg(0));
+    glShadeModel(c.arg(0));
 }
 
 /* Removes every `precision <qualifier> <type>;` statement from a shader body.
@@ -1148,91 +1143,91 @@ static void adapt_shader_source(std::string &src) {
 }
 
 void gl_glShaderSource(GuestCall &c) {
-            /* The guest ships GLSL ES 1.00, which desktop GL rejects outright:
-             *   "syntax error, unexpected identifier ... at token \"lowp\""
-             * Every shader failed, every program failed to link, and the engine
-             * -- which never reads the info log -- kept issuing draw calls
-             * against no valid program, i.e. a black screen.
-             *
-             * adapt_shader_source() rewrites it for whatever the host context
-             * actually is: a 3.0+ context just gets a "#version 130" prefix (1.30
-             * accepts the ES qualifiers as no-ops), a 2.1 one gets a "#version
-             * 120" prefix plus the precision-qualifier rewrite. Which of the two
-             * is chosen by pvz2_gl_target_glsl(), latched at startup, so this
-             * layer holds no version policy. */
-            GLuint shader = c.arg(0);
-            GLsizei count = (GLsizei)c.arg(1);
-            uint32_t strings_ptr = c.arg(2);
-            uint32_t length_ptr = c.arg(3);
+    /* The guest ships GLSL ES 1.00, which desktop GL rejects outright:
+     *   "syntax error, unexpected identifier ... at token \"lowp\""
+     * Every shader failed, every program failed to link, and the engine -- which
+     * never reads the info log -- kept issuing draw calls against no valid
+     * program, i.e. a black screen.
+     *
+     * adapt_shader_source() rewrites it for whatever the host context actually
+     * is: a 3.0+ context just gets a "#version 130" prefix (1.30 accepts the ES
+     * qualifiers as no-ops), a 2.1 one gets a "#version 120" prefix plus the
+     * precision-qualifier rewrite. Which of the two is chosen by
+     * pvz2_gl_target_glsl(), latched at startup, so this layer holds no version
+     * policy of its own. */
+    GLuint shader = c.arg(0);
+    GLsizei count = (GLsizei)c.arg(1);
+    uint32_t strings_ptr = c.arg(2);
+    uint32_t length_ptr = c.arg(3);
 
-            std::string src;
-            for (GLsizei i = 0; i < count; ++i) {
-                uint32_t guest_str_addr = c.read32(strings_ptr + (uint32_t)i * 4);
-                const char *chunk = (const char *)c.ptr(guest_str_addr);
-                if (chunk == nullptr) continue;
-                if (length_ptr) {
-                    GLint len = (GLint)c.read32(length_ptr + (uint32_t)i * 4);
-                    if (len >= 0) { src.append(chunk, (size_t)len); continue; }
-                }
-                src.append(chunk);
-            }
+    std::string src;
+    for (GLsizei i = 0; i < count; ++i) {
+        uint32_t guest_str_addr = c.read32(strings_ptr + (uint32_t)i * 4);
+        const char *chunk = (const char *)c.ptr(guest_str_addr);
+        if (chunk == nullptr) continue;
+        if (length_ptr) {
+            GLint len = (GLint)c.read32(length_ptr + (uint32_t)i * 4);
+            if (len >= 0) { src.append(chunk, (size_t)len); continue; }
+        }
+        src.append(chunk);
+    }
 
-            adapt_shader_source(src);
+    adapt_shader_source(src);
 
-            /* [gl] flat_fragment=1 replaces every fragment shader's body with a
-             * constant magenta output, keeping its declarations so it still
-             * links against the same attributes and uniforms.
-             *
-             * This is a bisection, not a fix. The composite draw has had every
-             * input verified -- geometry, matrix, attribute indices, vertex
-             * data, source texture, sampler, shader source, blend, scissor,
-             * depth, stencil, cull, colour mask, frame order, GL errors -- and
-             * still puts nothing on the window, while an identical draw earlier
-             * in the run does. Emitting a constant splits what is left in two:
-             * a magenta window means the draw rasterises and the fault is in
-             * the sampling; a black one means it produces no fragments at all. */
-            const bool flat = pvz2_config()->gl_flat_fragment != 0;
-            if (flat && src.find("gl_FragColor") != std::string::npos) {
-                const size_t body = src.find("void main");
-                if (body != std::string::npos) {
-                    src.resize(body);
-                    src += "void main() { gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0); }\n";
-                }
-            }
+    /* [gl] flat_fragment=1 replaces every fragment shader's body with a constant
+     * magenta output, keeping its declarations so it still links against the same
+     * attributes and uniforms.
+     *
+     * This is a bisection, not a fix. The composite draw has had every input
+     * verified -- geometry, matrix, attribute indices, vertex data, source
+     * texture, sampler, shader source, blend, scissor, depth, stencil, cull,
+     * colour mask, frame order, GL errors -- and still puts nothing on the
+     * window, while an identical draw earlier in the run does. Emitting a
+     * constant splits what is left in two: a magenta window means the draw
+     * rasterises and the fault is in the sampling; a black one means it produces
+     * no fragments at all. */
+    const bool flat = pvz2_config()->gl_flat_fragment != 0;
+    if (flat && src.find("gl_FragColor") != std::string::npos) {
+        const size_t body = src.find("void main");
+        if (body != std::string::npos) {
+            src.resize(body);
+            src += "void main() { gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0); }\n";
+        }
+    }
 
-            const GLchar *one = src.c_str();
-            GLint one_len = (GLint)src.size();
-            gl_shader_source(shader, 1, &one, &one_len);
+    const GLchar *one = src.c_str();
+    GLint one_len = (GLint)src.size();
+    glShaderSource(shader, 1, &one, &one_len);
 }
 
 void gl_glTexCoordPointer(GuestCall &c) {
-            gl_tex_coord_pointer(c.arg(0), c.arg(1), c.arg(2), c.ptr(c.arg(3)));
+    glTexCoordPointer(c.arg(0), c.arg(1), c.arg(2), c.ptr(c.arg(3)));
 }
 
 void gl_glTexEnvf(GuestCall &c) {
-            gl_tex_env_f(c.arg(0), c.arg(1), c.argf(2));
+    glTexEnvf(c.arg(0), c.arg(1), c.argf(2));
 }
 
 void gl_glTexImage2D(GuestCall &c) {
-            gl_tex_image_2_d(c.arg(0), c.arg(1), c.arg(2), c.arg(3), c.arg(4), c.arg(5),
+    glTexImage2D(c.arg(0), c.arg(1), c.arg(2), c.arg(3), c.arg(4), c.arg(5),
                               c.arg(6), c.arg(7), c.ptr(c.arg(8)));
 }
 
 void gl_glTexParameteri(GuestCall &c) {
-            gl_tex_parameter_i(c.arg(0), c.arg(1), c.arg(2));
+    glTexParameteri(c.arg(0), c.arg(1), c.arg(2));
 }
 
 void gl_glTexSubImage2D(GuestCall &c) {
-            gl_tex_sub_image_2_d(c.arg(0), c.arg(1), c.arg(2), c.arg(3), c.arg(4), c.arg(5),
+    glTexSubImage2D(c.arg(0), c.arg(1), c.arg(2), c.arg(3), c.arg(4), c.arg(5),
                                   c.arg(6), c.arg(7), c.ptr(c.arg(8)));
 }
 
 void gl_glUniform1i(GuestCall &c) {
-            gl_uniform_1_i(c.arg(0), c.arg(1));
+    glUniform1i(c.arg(0), c.arg(1));
 }
 
 void gl_glUniform4fv(GuestCall &c) {
-            gl_uniform_4_f_v(c.arg(0), c.arg(1), (const GLfloat *)c.ptr(c.arg(2)));
+    glUniform4fv(c.arg(0), c.arg(1), (const GLfloat *)c.ptr(c.arg(2)));
 }
 
 /* The location of a program's single mat4 uniform, or -1 if it has none or
@@ -1358,7 +1353,7 @@ void gl_glUniformMatrix4fv(GuestCall &c) {
                     const bool want_negative = bad < 0.0f;
                     if (want_negative != (fixed[i] < 0.0f)) fixed[i] = -fixed[i];
                 }
-                gl_uniform_matrix_4_f_v(loc, 1, (GLboolean)c.arg(2), fixed.data());
+                glUniformMatrix4fv(loc, 1, (GLboolean)c.arg(2), fixed.data());
             }
             return; /* never hand inf/nan to the driver */
         }
@@ -1386,20 +1381,20 @@ void gl_glUniformMatrix4fv(GuestCall &c) {
         }
     }
 
-    gl_uniform_matrix_4_f_v(loc, c.arg(1), (GLboolean)c.arg(2), m);
+    glUniformMatrix4fv(loc, c.arg(1), (GLboolean)c.arg(2), m);
 }
 
 void gl_glUseProgram(GuestCall &c) {
-            gl_use_program(c.arg(0));
+    glUseProgram(c.arg(0));
 }
 
 void gl_glVertexAttribPointer(GuestCall &c) {
-            gl_vertex_attrib_pointer(c.arg(0), c.arg(1), c.arg(2), (GLboolean)c.arg(3), c.arg(4),
+    glVertexAttribPointer(c.arg(0), c.arg(1), c.arg(2), (GLboolean)c.arg(3), c.arg(4),
                                       c.ptr(c.arg(5)));
 }
 
 void gl_glVertexPointer(GuestCall &c) {
-            gl_vertex_pointer(c.arg(0), c.arg(1), c.arg(2), c.ptr(c.arg(3)));
+    glVertexPointer(c.arg(0), c.arg(1), c.arg(2), c.ptr(c.arg(3)));
 }
 
 /* glGetUniformLocation was the one GLES symbol with no implementation at all:
@@ -1459,7 +1454,7 @@ void dump_program_uniforms(GuestCall &c) {
 }
 
 void gl_check_error_after(GuestCall &c, const char *name) {
-    GLenum err = gl_get_error();
+    GLenum err = glGetError();
     if (err == GL_NO_ERROR) return;
     static std::atomic<std::uint32_t> budget{20};
     if (budget.load(std::memory_order_relaxed) == 0) return;
@@ -1467,11 +1462,6 @@ void gl_check_error_after(GuestCall &c, const char *name) {
     c.log("[gl-strict] %s -> GL error 0x%04x (r0=0x%08x r1=0x%08x r2=0x%08x r3=0x%08x) lr=0x%08x",
           name, (unsigned)err, c.arg(0), c.arg(1), c.arg(2), c.arg(3), c.lr());
     if (std::strncmp(name, "glUniform", 9) == 0) dump_program_uniforms(c);
-}
-
-void set_drawable_size(std::uint32_t width, std::uint32_t height) {
-    g_drawable_w.store(width, std::memory_order_relaxed);
-    g_drawable_h.store(height, std::memory_order_relaxed);
 }
 
 void register_libgles(ImportTable &t) {

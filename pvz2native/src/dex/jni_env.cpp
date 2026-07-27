@@ -104,9 +104,11 @@ const char *const kSlotNames[] = {
     "GetModule", "IsVirtualThread", "GetStringUTFLengthAsLong",
 };
 constexpr std::uint32_t kSlotCount = sizeof(kSlotNames) / sizeof(kSlotNames[0]);
-
-std::uint32_t g_screen_width = 1280;
-std::uint32_t g_screen_height = 720;
+/* The layout in guest_memmap.h reserves room for kJniTableSlots entries in both
+ * the table and the stub block. Appending past that would silently overwrite the
+ * next region rather than fail. */
+static_assert(kSlotCount <= runtime::memmap::kJniTableSlots,
+              "the JNI slot table outgrew the space reserved for it in guest_memmap.h");
 
 /* (class, method) -> guest address of the engine native RegisterNatives bound.
  * Written during JNI_OnLoad, read when a hook calls a native back. */
@@ -451,13 +453,6 @@ const char *jni_slot_name(std::uint32_t slot) {
     return slot < kSlotCount ? kSlotNames[slot] : "<beyond-known-table>";
 }
 
-void set_screen_size(std::uint32_t width, std::uint32_t height) {
-    g_screen_width = width;
-    g_screen_height = height;
-}
-std::uint32_t screen_width() { return g_screen_width; }
-std::uint32_t screen_height() { return g_screen_height; }
-
 void register_native_method(const std::string &class_name, const std::string &method,
                             std::uint32_t fn_addr) {
     std::lock_guard<std::mutex> lk(g_natives_lock);
@@ -596,7 +591,7 @@ void install(pvz2_elf_image_t *img) {
     }
     write32(kJniEnvPtrAddr, kJniTableAddr);
 
-    for (std::uint32_t i = 0; i < kJavaVmSlotCount; ++i) {
+    for (std::uint32_t i = 0; i < kJavaVmSlots; ++i) {
         std::uint32_t stub = kJavaVmStubsAddr + i * 8;
         write32(stub + 0, 0xEF000000u | (kJavaVmSvcBase + i));
         write32(stub + 4, 0xE12FFF1Eu);
@@ -610,11 +605,11 @@ void install(pvz2_elf_image_t *img) {
 
 bool owns_svc(std::uint32_t swi) {
     return (swi >= kJniSvcBase && swi < kJniSvcBase + kSlotCount) ||
-           (swi >= kJavaVmSvcBase && swi < kJavaVmSvcBase + kJavaVmSlotCount);
+           (swi >= kJavaVmSvcBase && swi < kJavaVmSvcBase + kJavaVmSlots);
 }
 
 void dispatch_svc(GuestCall &c, std::uint32_t swi) {
-    if (swi >= kJavaVmSvcBase && swi < kJavaVmSvcBase + kJavaVmSlotCount) {
+    if (swi >= kJavaVmSvcBase && swi < kJavaVmSvcBase + kJavaVmSlots) {
         handle_javavm(c, swi - kJavaVmSvcBase);
         return;
     }

@@ -42,6 +42,19 @@ void dump_touch_scaler(pvz2_elf_image_t *img);
  * disassembly. */
 void dump_dword(pvz2_elf_image_t *img, const char *label, std::uint32_t offset);
 
+/* The four bytes that decide whether onDrawFrame does anything (9.6.1 only,
+ * quiet on any version whose app_driver is unmapped).
+ *
+ * onDrawFrame skips the whole frame when driver[316] is non-zero, and the only
+ * code that clears it is HandleApplicationDidBecomeActive -- behind a guard on
+ * driver[326] && (driver[325] || driver[324]), the three bytes the
+ * Native_Notify* natives write. Printing all four says which half of that is
+ * failing, which static reading cannot: either the writes are not landing on
+ * the object the handler reads, or they are and the handler is never
+ * dispatched. Also follows the dispatcher's own path to the object it passes,
+ * so the two pointers can be compared directly. */
+void dump_frame_gate(pvz2_elf_image_t *img, const char *when);
+
 /* Builds a guest std::string and returns its address, for calling engine
  * functions that take one by reference.
  *

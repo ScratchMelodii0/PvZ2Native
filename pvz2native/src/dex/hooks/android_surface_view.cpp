@@ -7,6 +7,8 @@
 
 #include <pvz2native/dex/dex.h>
 
+#include <pvz2native/surface.h>
+
 namespace pvz2native {
 namespace dex {
 namespace {
@@ -37,8 +39,8 @@ void can_set_scale_factor(DexCall &d) { d.ret_bool(true); }
 void get_screen_size(DexCall &d) {
     std::uint32_t out = d.arg(0);
     if (out == 0 || !d.c.in_bounds(out, 8)) return;
-    d.c.write32(out + 0, screen_width());
-    d.c.write32(out + 4, screen_height());
+    d.c.write32(out + 0, pvz2_surface_width());
+    d.c.write32(out + 4, pvz2_surface_height());
 }
 
 /* int Graphics_GetGLViewSysFBO() -- 0 is the default framebuffer, which is

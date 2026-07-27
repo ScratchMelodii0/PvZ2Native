@@ -96,6 +96,16 @@ void m_modf(GuestCall &c) {
     c.set_resultd(frac);
 }
 
+/* --- what 9.6.1 adds ---------------------------------------------------------
+ *
+ * fmax/fmin are NOT std::max/std::min: they are specified to return the
+ * non-NaN operand when exactly one is NaN, which is what std::fmax/fmin do and
+ * a comparison does not. */
+BINARY_D(m_fmax, std::fmax(x, y))
+BINARY_D(m_fmin, std::fmin(x, y))
+UNARY_F(m_logf, std::log(x))
+UNARY_F(m_nearbyintf, std::nearbyint(x))
+
 /* --- the rest of <math.h>, added for 4.5.2 ---------------------------------
  *
  * 4.5.2 imports 38 more symbols from libm than 1.6 does. Each is one host call,
@@ -263,6 +273,11 @@ void register_libm(ImportTable &t) {
     t.add("remquo", m_remquo);
     t.add("scalbn", m_scalbn);
     t.add("scalbnl", m_scalbn); /* long double == double on ARM AAPCS */
+
+    t.add("fmax", m_fmax);
+    t.add("fmin", m_fmin);
+    t.add("logf", m_logf);
+    t.add("nearbyintf", m_nearbyintf);
 
     t.add("atanf", m_atanf);
     t.add("log10f", m_log10f);

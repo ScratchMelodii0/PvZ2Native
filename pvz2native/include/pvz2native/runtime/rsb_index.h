@@ -1,11 +1,19 @@
 #ifndef PVZ2NATIVE_RUNTIME_RSB_INDEX_H
 #define PVZ2NATIVE_RUNTIME_RSB_INDEX_H
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
 
 namespace pvz2native {
+
+/* The scheme prefix SexyAppFramework stamps on every resource lookup. Two layers
+ * strip it -- RsbIndex::normalize on the way to an index lookup, and
+ * vfs::translate on the way to a host open -- and they each used to spell it out
+ * with their own local copy and their own sizeof arithmetic. */
+constexpr char kAssetScheme[] = "ASSET:";
+constexpr std::size_t kAssetSchemeLen = sizeof(kAssetScheme) - 1;
 
 /* Index of every file packed inside the game's main RSB (the .obb).
  *

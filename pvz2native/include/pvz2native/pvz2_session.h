@@ -38,29 +38,15 @@ pvz2_session_t *pvz2_session_start(const char *so_path);
  * still usable; the host decides when to stop. */
 int pvz2_session_frame(pvz2_session_t *session);
 
-/* The fixed resolution the engine renders its scene at (the size reported to
- * Graphics_GetScreenSizeInPixels). The window may be any size and the composite
- * is scaled to it, so the host needs this to map window-pixel input back into
- * the engine's coordinate space. Safe to call before pvz2_session_start. */
-void pvz2_render_size(int *width, int *height);
-
-/* Sets the resolution the engine will launch at, BEFORE pvz2_session_start. The
- * host resolves it from the [video] config (auto-aspect, native, or explicit)
- * and calls this so the guest surface, the window and the touch space all start
- * from the same size. A later window resize goes through
- * pvz2_session_request_resize instead. */
-void pvz2_set_render_size(int width, int height);
-
-/* Tell the compositor the current window drawable size, so the final pass fills
- * the window instead of the engine's render size. Call once the window exists
- * and again whenever it is resized. */
-void pvz2_set_drawable_size(int width, int height);
-
-/* Ask for the engine to re-render at a new resolution after a window resize.
+/* Ask the engine to re-render at the surface's CURRENT size, after the host has
+ * published a new one with pvz2_surface_set (see <pvz2native/surface.h>).
+ *
  * Deferred: the actual onSurfaceChanged runs on the frame thread at the start of
  * the next pvz2_session_frame, so this is safe to call from the SDL event
- * handler. Coalesced -- only the most recent size is applied. */
-void pvz2_session_request_resize(int width, int height);
+ * handler. Takes no size -- there is only one surface size and every layer
+ * already reads it, which is also what makes repeated calls during a window drag
+ * coalesce into one re-layout per frame at the latest size. */
+void pvz2_session_request_resize(void);
 
 /* Joins any leftover guest threads and frees the image. */
 void pvz2_session_end(pvz2_session_t *session);

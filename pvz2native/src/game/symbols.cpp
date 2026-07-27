@@ -2,68 +2,116 @@
  *
  * Adding a release means adding one entry to kVersions below and nothing else:
  * no file outside this one holds an address into libPVZ2.so. To fill an entry,
- * decompile JNI_OnLoad and read its JNINativeMethod tables for the eight
- * `native` offsets, then take the two fingerprints with any hex viewer.
+ * decompile JNI_OnLoad and read its JNINativeMethod tables for the `native`
+ * offsets, then take the two fingerprints with any hex viewer.
+ *
+ * Name every field you set (.native = {...}) and leave the rest out rather than
+ * writing a 0 placeholder -- see GameSymbols for why a positional entry here is
+ * a silent hazard. What an entry does NOT mention is unmapped, which is exactly
+ * what 0 means to every reader of the table.
  */
 
 #include <pvz2native/game/symbols.h>
 
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 
 namespace pvz2native {
+
+const char *const kGameAppClass = "com/popcap/SexyAppFramework/AndroidGameApp";
+
 namespace {
 
-const GameSymbols kUnknown{"unknown", {}, 0, {}, {}, {}, {}, {}, 0, 0};
+/* Every other field value-initialises to 0/nullptr, which is exactly what
+ * "nothing is mapped" means -- and stays true when a field is added. */
+const GameSymbols kUnknown{.version = "unknown"};
+
+/* Element count of a class-name array, so no entry below has to spell out the
+ * sizeof/sizeof and risk dividing by the wrong array. */
+template <std::size_t N>
+constexpr std::uint32_t kCount(const char *const (&)[N]) {
+    return (std::uint32_t)N;
+}
+
+/* Native_GameAppInitialize's declared objects for 1.6.10 and 4.5.2, which share
+ * the same eight-object signature -- the third being an AndroidFacebookDriver
+ * that 9.6.1 no longer has. */
+const char *const kGameAppInitArgsLegacy[] = {
+    "com/popcap/SexyAppFramework/AndroidSurfaceView",
+    "com/popcap/SexyAppFramework/AndroidHttpProxy",
+    "com/popcap/SexyAppFramework/AndroidFacebookDriver",
+    "com/popcap/SexyAppFramework/cloud/Cloud",
+    "com/popcap/SexyAppFramework/GooglePlay/GooglePlayConnect",
+    "com/popcap/SexyAppFramework/GooglePlay/GooglePlayAchievements",
+    "com/popcap/SexyAppFramework/GooglePlay/GooglePlayLeaderboard",
+    "com/popcap/SexyAppFramework/AndroidNotification",
+};
+
+/* Native_GameAppInitialize's declared objects for PvZ2 9.6.1, read off the JNI
+ * signature in its JNINativeMethod entry:
+ *   (Lcom/popcap/SexyAppFramework/AndroidSurfaceView;
+ *    Lcom/popcap/SexyAppFramework/AndroidHttpProxy;
+ *    Lcom/popcap/SexyAppFramework/cloud/Cloud;
+ *    Lcom/popcap/SexyAppFramework/GooglePlay/GooglePlayConnect;
+ *    Lcom/popcap/SexyAppFramework/GooglePlay/GooglePlayAchievements;
+ *    Lcom/popcap/SexyAppFramework/GooglePlay/GooglePlayLeaderboard;
+ *    Lcom/popcap/SexyAppFramework/AndroidNotification;)Z
+ * Seven, not the eight of 1.6/4.5.2 -- AndroidFacebookDriver is gone. */
+const char *const kGameAppInitArgs961[] = {
+    "com/popcap/SexyAppFramework/AndroidSurfaceView",
+    "com/popcap/SexyAppFramework/AndroidHttpProxy",
+    "com/popcap/SexyAppFramework/cloud/Cloud",
+    "com/popcap/SexyAppFramework/GooglePlay/GooglePlayConnect",
+    "com/popcap/SexyAppFramework/GooglePlay/GooglePlayAchievements",
+    "com/popcap/SexyAppFramework/GooglePlay/GooglePlayLeaderboard",
+    "com/popcap/SexyAppFramework/AndroidNotification",
+};
 
 const GameSymbols kVersions[] = {
     /* --- 1.6.10 (2013, armeabi-v7a) ------------------------------------- */
     {
-        "1.6.10",
-        /* native */ {
-            0x9eaf98, /* Native_GameAppInitialize                */
-            0x9ebfb8, /* Native_applicationWillFinishLaunching   */
-            0x9ec0d8, /* Native_applicationDidFinishLaunching    */
-            0x9ec0f4, /* Native_applicationWillBecomeForeground  */
-            0x9ec100, /* Native_applicationDidBecomeActive       */
-            0x9f1878, /* Native_onSurfaceCreated                 */
-            0x9f1914, /* Native_onSurfaceChanged                 */
-            0x9f1944, /* Native_onDrawFrame                      */
-            0,        /* no PumpMessageQueue: onDrawFrame drains */
+        .version = "1.6.10",
+        .native = {
+            .game_app_initialize                = 0x9eaf98,
+            .application_will_finish_launching  = 0x9ebfb8,
+            .application_did_finish_launching   = 0x9ec0d8,
+            .application_will_become_foreground = 0x9ec0f4,
+            .application_did_become_active      = 0x9ec100,
+            .on_surface_created                 = 0x9f1878,
+            .on_surface_changed                 = 0x9f1914,
+            .on_draw_frame                      = 0x9f1944,
+            /* No PumpMessageQueue: onDrawFrame drains the queue itself. */
         },
-        /* surface_changed_pad */ 2,
-        /* global */ {
-            0xd55650, /* dword_D55650 -- LawnApp                 */
-            0xdc8fd4, /* dword_DC8FD4 -- AndroidAppDriver        */
+        .surface_changed_pad = 2,
+        .global = {
+            .app        = 0xd55650, /* dword_D55650 -- LawnApp          */
+            .app_driver = 0xdc8fd4, /* dword_DC8FD4 -- AndroidAppDriver */
         },
-        /* fn */ {
-            0xb75560, /* std::string(const char*, allocator)     */
+        .fn = {
+            .string_ctor = 0xb75560, /* std::string(const char*, allocator) */
         },
-        /* jni_native */ {
-            0, /* http_transaction_error: 1.6 reaches the menu, left untouched */
+        /* jni_native.http_transaction_error: 1.6 reaches the menu, left untouched.
+         * patch: not mapped -- nothing is rewritten, so its store behaves exactly
+         * as it always has.
+         * probe: frame-gate offsets not located for 1.6. */
+        .input = {
+            .driver        = 68,
+            .scaler        = 696,
+            .touch_begin   = 192,
+            .touch_end     = 196,
+            .touch_stride  = 48,
+            .multitouch    = 220,
+            .touch_active  = 221,
+            .scaler_fields = 176,
+            .vt_touch_down = 432,
+            .vt_touch_up   = 436,
+            .vt_touch_move = 440,
         },
-        /* patch */ {
-            /* Not mapped for 1.6 -- nothing is rewritten, so its store behaves
-             * exactly as it always has. */
-            {0}, /* purchase_online_gate     */
-            0,   /* purchase_local_receipt   */
-            0,   /* purchase_receipt_verdict */
-        },
-        /* input */ {
-            68,  /* driver        */
-            696, /* scaler        */
-            192, /* touch_begin   */
-            196, /* touch_end     */
-            48,  /* touch_stride  */
-            220, /* multitouch    */
-            221, /* touch_active  */
-            176, /* scaler_fields */
-            432, /* vt_touch_down */
-            436, /* vt_touch_up   */
-            440, /* vt_touch_move */
-        },
-        0xE59F0014E92D4800ull, /* PUSH {R11,LR}; LDR R0,=...      */
-        0xE24DD094E92D4FF0ull, /* PUSH {R4-R11,LR}; SUB SP,SP,#0x94 */
+        .fingerprint_draw_frame    = 0xE59F0014E92D4800ull, /* PUSH {R11,LR}; LDR R0,=...        */
+        .fingerprint_game_app_init = 0xE24DD094E92D4FF0ull, /* PUSH {R4-R11,LR}; SUB SP,SP,#0x94 */
+        .game_app_init_args      = kGameAppInitArgsLegacy,
+        .game_app_init_arg_count = kCount(kGameAppInitArgsLegacy),
     },
 
     /* --- 4.5.2 (2016, armeabi-v7a, 18MB) ---------------------------------
@@ -83,29 +131,29 @@ const GameSymbols kVersions[] = {
      * only diagnostics/, which checks for 0 and stays quiet, so the boot does
      * not depend on them. */
     {
-        "4.5.2",
-        /* native */ {
-            0xcc033c, /* Native_GameAppInitialize                */
-            0xcc131c, /* Native_applicationWillFinishLaunching   */
-            0xcc1420, /* Native_applicationDidFinishLaunching    */
-            0xcc142c, /* Native_applicationWillBecomeForeground  */
-            0xcc1430, /* Native_applicationDidBecomeActive       */
-            0xcc7cf0, /* Native_onSurfaceCreated                 */
-            0xcc7d8c, /* Native_onSurfaceChanged                 */
-            0xcc7e60, /* Native_onDrawFrame                      */
-            0xcc7cd0, /* PumpMessageQueue                        */
+        .version = "4.5.2",
+        .native = {
+            .game_app_initialize                = 0xcc033c,
+            .application_will_finish_launching  = 0xcc131c,
+            .application_did_finish_launching   = 0xcc1420,
+            .application_will_become_foreground = 0xcc142c,
+            .application_did_become_active      = 0xcc1430,
+            .on_surface_created                 = 0xcc7cf0,
+            .on_surface_changed                 = 0xcc7d8c,
+            .on_draw_frame                      = 0xcc7e60,
+            .pump_message_queue                 = 0xcc7cd0,
         },
-        /* surface_changed_pad */ 1, /* body reads r2/r3 -- plain static native */
-        /* global */ {
-            0,         /* LawnApp -- not located yet                       */
-            0x117a734, /* AndroidAppDriver: the pointer onSurfaceCreated   */
-                       /* and onDrawFrame dereference (1.6's dword_DC8FD4) */
+        .surface_changed_pad = 1, /* body reads r2/r3 -- plain static native */
+        .global = {
+            /* LawnApp is not located yet; the driver is the pointer
+             * onSurfaceCreated and onDrawFrame dereference (1.6's dword_DC8FD4). */
+            .app_driver = 0x117a734,
         },
-        /* fn */ {0},
-        /* jni_native */ {
-            0xcded8c, /* HttpTransactionError: enqueues a failure via sub_CB9F80 */
+        .jni_native = {
+            /* HttpTransactionError: enqueues a failure via sub_CB9F80. */
+            .http_transaction_error = 0xcded8c,
         },
-        /* patch */ {
+        .patch = {
             /* purchase_online_gate -- the four `BL sub_247084` inside the
              * PurchaseBroker (sub_247084 is "GetNetworkStatus() is 1 or 2").
              * Every one of them gates a purchase step on connectivity and shows
@@ -113,29 +161,124 @@ const GameSymbols kVersions[] = {
              * first is the one a player hits by pressing Buy.
              * The SAME helper is called from a dozen non-store places, which is
              * exactly why the call sites are patched and not the helper. */
-            {
+            .purchase_online_gate = {
                 0x72d320, /* in sub_72D264 -- start a single purchase       */
                 0x72dc14, /* in sub_72DB98 -- "is the store offline?"        */
                 0x72e0d8, /* in sub_72E0C0 -- restore purchases              */
                 0x72e38c, /* in sub_72E384 -- any purchase still in flight?  */
-                0,
             },
-            /* purchase_local_receipt: the `MOV R1,#1` in sub_737DB8, whose only
-             * caller is PurchaseBroker::OnPaymentComplete (sub_72EE30). R1=1
-             * means "POST this receipt to the validation server and wait for
-             * $.validation"; R1=0 takes sub_737DC0's finish-now branch. */
-            0x737db8,
-            /* purchase_receipt_verdict: the `MOV R0,#0` at the head of that
-             * finish-now branch (loc_737EA4), whose STRB writes the record's
-             * "validated" byte before it sets the state to 4=finished. 0 there
-             * is what makes the broker (sub_7305D8) show "Unable to contact
-             * store" instead of delivering; 1 is what sub_738F3C writes when a
-             * real server replies "passed". */
-            0x737ea4,
+            /* The `MOV R1,#1` in sub_737DB8, whose only caller is
+             * PurchaseBroker::OnPaymentComplete (sub_72EE30). R1=1 means "POST
+             * this receipt to the validation server and wait for $.validation";
+             * R1=0 takes sub_737DC0's finish-now branch. */
+            .purchase_local_receipt = 0x737db8,
+            /* The `MOV R0,#0` at the head of that finish-now branch
+             * (loc_737EA4), whose STRB writes the record's "validated" byte
+             * before it sets the state to 4=finished. 0 there is what makes the
+             * broker (sub_7305D8) show "Unable to contact store" instead of
+             * delivering; 1 is what sub_738F3C writes when a real server replies
+             * "passed". */
+            .purchase_receipt_verdict = 0x737ea4,
         },
-        /* input */ {},
-        0xE59F1010E59F0010ull, /* LDR R0,[PC,#0x10]; LDR R1,[PC,#0x10] */
-        0xE24DD084E92D4FF0ull, /* PUSH {R4-R11,LR}; SUB SP,SP,#0x84    */
+        /* probe: the frame-gate field offsets are 9.6.1's; reading a 4.5.2 driver
+         * at them printed plausible garbage, which is worse than printing
+         * nothing. input: not mapped either. */
+        .fingerprint_draw_frame    = 0xE59F1010E59F0010ull, /* LDR R0,[PC,#0x10]; LDR R1,[PC,#0x10] */
+        .fingerprint_game_app_init = 0xE24DD084E92D4FF0ull, /* PUSH {R4-R11,LR}; SUB SP,SP,#0x84    */
+        .game_app_init_args      = kGameAppInitArgsLegacy,
+        .game_app_init_arg_count = kCount(kGameAppInitArgsLegacy),
+    },
+
+    /* --- 9.6.1 (PvZ2 Reflourished 1.3.1, armeabi-v7a, 30MB) ---------------
+     *
+     * The last Reflourished release that ships an armeabi-v7a build at all --
+     * 1.4.2 is arm64-only, which this emulator cannot run. Both APKs are
+     * versionCode 675, so main.675.com.ea.game.pvz2_rfl.obb pairs with either.
+     *
+     * First build with real DT_NEEDED dependencies: libc++_shared.so and
+     * libNimble.so supply 119 of its 514 imports, so the loader maps them beside
+     * libPVZ2.so rather than shimming them (see pvz2_elf_load).
+     *
+     * The natives were located by decoding the JNINativeMethod arrays whole. A
+     * 12-byte table of pointers is self-similar under a 4-byte shift, so a
+     * pattern scan reports every array three times with three different
+     * apparent field orders and three different sets of function addresses --
+     * the correct one is the one whose START ADDRESS is referenced by the code
+     * that passes it to RegisterNatives. Three arrays, all {name, sig, fn},
+     * separated by NULL words:
+     *   0x1d0e960 (3) GameAppInitialize, GameAppTeardown, getGooglePlayAPIKey
+     *   0x1d0e988 (1) createNativeApplicationLifecycleObserver
+     *   0x1d0e998 (15) the lifecycle family
+     *   0x1d0ea80 (6) the surface family + PumpMessageQueue
+     *   0x1d10138 (5) the HTTP callbacks
+     * Several lifecycle natives are one-instruction thunks -- 0x1277934 and
+     * 0x1277938 are a bare `BX LR` -- which is why they sit 4 bytes apart and
+     * looks like a misread but is not. */
+    {
+        .version = "9.6.1",
+        .native = {
+            .game_app_initialize                = 0x12768c4,
+            .application_will_finish_launching  = 0x1277854,
+            .application_did_finish_launching   = 0x1277938, /* a bare BX LR */
+            .application_will_become_foreground = 0x1277944,
+            .application_did_become_active      = 0x1277948,
+            .on_surface_created                 = 0x127cc34,
+            .on_surface_changed                 = 0x127ccd0,
+            .on_draw_frame                      = 0x127cdcc,
+            .pump_message_queue                 = 0x127cc24,
+            .create_lifecycle_observer          = 0x1277000,
+            .notify_surface_change              = 0x1277ad4, /* -> driver+326 */
+            .notify_app_running                 = 0x1277ac0, /* -> driver+325 */
+            .notify_focus_change                = 0x1277aac, /* -> driver+324 */
+        },
+        .surface_changed_pad = 1, /* body does MOV R5,R2 / MOV R4,R3 -- plain
+                                   * static native, confirmed by disassembly,
+                                   * as does Native_onOrientationChanged which
+                                   * forwards r2/r3 straight into r0/r1 */
+        .global = {
+            /* LawnApp: the pointer sub_FC2A74 (the body of
+             * Native_applicationWillFinishLaunching) `operator new`s and stores
+             * before running the framework. Worth having beyond diagnostics:
+             * the AndroidAppDriver lives at *(app + 8) -- SexyAppBase's
+             * constructor puts it there (0x10d144c: BL ctor; STR r0,[r4,#8]) --
+             * so this global reaches the driver even while the driver's OWN
+             * global is still unpublished. */
+            .app = 0x1d92a94,
+            /* AndroidAppDriver: onDrawFrame and all three Native_Notify* natives
+             * reach it through this one GOT slot (LDR r0,=off; LDR r0,[pc,r0]). */
+            .app_driver = 0x1d9ce44,
+        },
+        .jni_native = {
+            /* HttpTransactionError, 4th of the 5-entry HTTP array. */
+            .http_transaction_error = 0x129eb68,
+        },
+        /* patch: not mapped -- the purchase-broker rewrites are 4.5.2 addresses
+         * and mean nothing here. The store simply behaves as the engine's own
+         * offline path dictates until they are found for this build. */
+        .probe = {
+            /* Byte flags read off onDrawFrame's body (0x12853e0) and
+             * HandleApplicationDidBecomeActive (0x1281914). */
+            .gate_skip_frame = 316,
+            .gate_focus      = 324,
+            .gate_running    = 325,
+            .gate_surface    = 326,
+            /* SexyAppBase's ctor: BL <driver ctor>; STR r0,[r4,#8] at 0x10d144c. */
+            .app_driver_field = 8,
+            /* From the {offset_to_top, typeinfo} header preceding it, typeinfo
+             * RTTI name "N4Sexy16AndroidAppDriverE". */
+            .driver_vtable = 0x1d0eb90,
+            .publish_slot  = 0x1d0ecdc,
+            .publish_thunk = 0x128277c, /* stores `this` into the driver global */
+            /* Sexy::AndroidAsyncIOFileDriver, created and stored by SexyAppBase's
+             * constructor ~20 lines before it builds the app driver. Named from
+             * the RTTI its vtable (0x1d0fddc) points at. */
+            .file_driver = 0x1d96db0,
+        },
+        /* input: not mapped for this build. */
+        .fingerprint_draw_frame    = 0xE79F0000E59F0004ull, /* LDR R0,[PC,#4]; LDR R0,[PC,R0]     */
+        .fingerprint_game_app_init = 0xE28DB01CE92D4FF0ull, /* PUSH {R4-R11,LR}; ADD R11,SP,#0x1C */
+        .game_app_init_args      = kGameAppInitArgs961,
+        .game_app_init_arg_count = kCount(kGameAppInitArgs961),
     },
 };
 
@@ -162,6 +305,7 @@ const GameSymbols &sym() { return *g_active; }
 
 bool game_symbols_detect(const pvz2_elf_image_t *img) {
     if (img == nullptr) return false;
+
     for (const GameSymbols &v : kVersions) {
         if (!matches(img, v)) continue;
         g_active = &v;

@@ -7,7 +7,7 @@
  * Initialization failed for <path>" and "RSB Initialization failed for ".
  */
 
-#include "libc_internal.h"
+#include <pvz2native/dependencies/libc_internal.h>
 
 #include <mutex>
 #include <string>

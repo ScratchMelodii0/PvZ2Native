@@ -1,0 +1,2 @@
+C:\mingw64roblauncher\bin\ar.exe qc libglad.a CMakeFiles/glad.dir/gladsources/glad/src/egl.c.obj CMakeFiles/glad.dir/gladsources/glad/src/gl.c.obj
+C:\mingw64roblauncher\bin\ranlib.exe libglad.a

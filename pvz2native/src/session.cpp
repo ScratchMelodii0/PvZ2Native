@@ -31,6 +31,7 @@
 #include <pvz2native/pvz2_session.h>
 #include <pvz2native/runtime/dynarmic_config.h>
 #include <pvz2native/runtime/guest_runtime.h>
+#include <pvz2native/surface.h>
 
 extern "C" {
 #include <pvz2native/elf32/elf32_loader.h>
@@ -73,35 +74,18 @@ struct pvz2_session {
 
 extern "C" void pvz2_session_set_host_pump(pvz2_host_pump_fn fn) { rt_::set_host_pump(fn); }
 
-extern "C" void pvz2_render_size(int *width, int *height) {
-    if (width) *width = (int)rt_::window_width();
-    if (height) *height = (int)rt_::window_height();
-}
-
-extern "C" void pvz2_set_render_size(int width, int height) {
-    rt_::set_window_size((std::uint32_t)width, (std::uint32_t)height);
-}
-
-extern "C" void pvz2_set_drawable_size(int width, int height) {
-    if (width <= 0 || height <= 0) return;
-    pvz2native::set_drawable_size((std::uint32_t)width, (std::uint32_t)height);
-}
-
-/* A window resize the host asked for, applied on the frame thread. It cannot be
- * applied from the SDL event handler: re-running onSurfaceChanged is a guest
+/* "The surface changed size, tell the engine" -- a flag, not a size. It cannot be
+ * acted on from the SDL event handler: re-running onSurfaceChanged is a guest
  * call and must happen on the thread that owns the JIT and GL context, between
- * frames. Coalesced -- only the latest size matters, so a drag that fires every
- * frame costs one onSurfaceChanged per frame, not a backlog. */
+ * frames. The new size needs no queue of its own because the host has already
+ * published it through pvz2_surface_set; this only says "it moved". That also
+ * coalesces for free -- a drag firing every frame costs one onSurfaceChanged per
+ * frame at the latest size, never a backlog at stale ones. */
 namespace {
-std::atomic<int> g_resize_w{0};
-std::atomic<int> g_resize_h{0};
 std::atomic<bool> g_resize_pending{false};
 }  // namespace
 
-extern "C" void pvz2_session_request_resize(int width, int height) {
-    if (width <= 0 || height <= 0) return;
-    g_resize_w.store(width, std::memory_order_relaxed);
-    g_resize_h.store(height, std::memory_order_relaxed);
+extern "C" void pvz2_session_request_resize(void) {
     g_resize_pending.store(true, std::memory_order_release);
 }
 
@@ -139,9 +123,6 @@ extern "C" pvz2_session_t *pvz2_session_start(const char *so_path) {
     rt_::build_import_handler_cache(&s->img);
     pvz2native::initialize_data_imports(&s->img, &s->rt);
 
-    dex::set_screen_size(rt_::window_width(), rt_::window_height());
-    /* Same size, but the GL layer needs it independently -- see gl_glViewport. */
-    pvz2native::set_drawable_size(rt_::window_width(), rt_::window_height());
     dex::install(&s->img);
 
     s->rt.img = &s->img;
@@ -170,16 +151,17 @@ extern "C" pvz2_session_t *pvz2_session_start(const char *so_path) {
 extern "C" int pvz2_session_frame(pvz2_session_t *s) {
     if (s == nullptr) return 0;
 
-    /* A pending window resize, applied here on the frame thread: tell the engine
-     * the new screen size and re-run onSurfaceChanged so it re-lays-out and
-     * renders AT that resolution, rather than upscaling a fixed one. Done before
-     * the frame so this frame already draws at the new size. */
+    /* A pending window resize, applied here on the frame thread: re-run
+     * onSurfaceChanged so the engine re-lays-out and renders AT that resolution
+     * rather than upscaling a fixed one. Done before the frame so this frame
+     * already draws at the new size.
+     *
+     * The size itself is already current -- the host set it through
+     * pvz2_surface_set the moment the resize arrived, and every layer reads that
+     * one store. Only telling the ENGINE has to wait for the frame thread. */
     if (g_resize_pending.exchange(false, std::memory_order_acquire)) {
-        const int w = g_resize_w.load(std::memory_order_relaxed);
-        const int h = g_resize_h.load(std::memory_order_relaxed);
-        dex::set_screen_size((std::uint32_t)w, (std::uint32_t)h);
-        pvz2native::set_drawable_size((std::uint32_t)w, (std::uint32_t)h);
-        engine::run_surface_changed(&s->img, &s->rt, (std::uint32_t)w, (std::uint32_t)h);
+        engine::run_surface_changed(&s->img, &s->rt, pvz2_surface_width(),
+                                    pvz2_surface_height());
     }
 
     /* Instruction-level trace of a settled frame -- see kPcSampleFrames. The
@@ -215,6 +197,13 @@ extern "C" int pvz2_session_frame(pvz2_session_t *s) {
 
     engine::draw_frame(&s->img, &s->rt, s->frames_run);
     ++s->frames_run;
+
+    /* The lifecycle only ENQUEUES applicationDidBecomeActive; the handler that
+     * consults the gate bytes runs inside the first PumpMessageQueue. So the
+     * state that matters is the one AFTER a frame, not after the lifecycle. */
+    if (s->frames_run == 2) {
+        diag::dump_frame_gate(&s->img, "after first frames");
+    }
 
     if (s->sample_frames_left > 0 && --s->sample_frames_left == 0) {
         rt_::set_slice_override(0);

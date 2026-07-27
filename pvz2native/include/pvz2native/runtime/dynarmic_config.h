@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -50,16 +51,9 @@ constexpr std::uint32_t kThreadStackSize = 0x00100000; /* 1MB each, 8 slots -> 0
 constexpr std::uint32_t kStackTop = 0x16000000;
 constexpr std::uint32_t kAddressSpaceSize = 0x18000000; /* 384MB */
 
-/* The size we tell the guest its surface is. Chosen once at startup (main.c
- * calls set_window_size from the resolved [video] settings before the session
- * starts) and constant thereafter; a runtime window RESIZE is a separate path
- * that re-runs onSurfaceChanged (see pvz2_session_request_resize). Defaults to
- * 960x540. Must match the SDL window in main.c: the engine derives its whole
- * projection from this via Graphics_GetScreenSizeInPixels ->
- * LawnApp::SetWidthHeight. */
-std::uint32_t window_width();
-std::uint32_t window_height();
-void set_window_size(std::uint32_t w, std::uint32_t h);
+/* The surface size lives in <pvz2native/surface.h>, not here. This layer used to
+ * keep its own copy (window_width/window_height/set_window_size) alongside two
+ * others that always held the same number -- see that header. */
 
 /* Where the guest heap starts, and how big it is.
  *
@@ -127,7 +121,11 @@ void watch_disarm();
  * small slice makes the PC sampler emit a sample every few instructions, which
  * is how you find where a short call bails out -- a steady-state frame costs
  * ~1363 ticks against a 1,000,000-tick slice, so otherwise there is exactly one
- * slice boundary, at the entry PC. */
+ * slice boundary, at the entry PC.
+ *
+ * Reaches only the main context: it works through GetTicksRemaining(), and
+ * worker and nested contexts no longer count cycles (see GuestThreadCtx), so
+ * they run a callback or a whole thread in one uninterrupted slice. */
 void set_slice_override(std::uint32_t ticks);
 
 /* --- the JIT ---------------------------------------------------------------- */
@@ -196,6 +194,57 @@ public:
     bool MemoryWriteExclusive32(std::uint32_t vaddr, std::uint32_t value, std::uint32_t) override;
     bool MemoryWriteExclusive64(std::uint32_t vaddr, std::uint64_t value, std::uint64_t) override;
 
+    /* "Will a read from here always give the same answer?" Asked once per
+     * translated instruction, never at run time, and answering it truthfully
+     * for the game's R+X segment costs nothing and pays well.
+     *
+     * dynarmic's ConstProp pass (already on) folds any memory read whose
+     * address is a compile-time constant into the value itself when this says
+     * yes. On ARM32 that is not a corner case: the ISA has no 32-bit immediate,
+     * so every constant, every string address and every function pointer is
+     * fetched with `LDR Rd, [PC, #imm]` from a literal pool sitting in .text --
+     * and the translator knows PC, so those reads arrive here with a literal
+     * address. Each one turns from a page-table lookup into a `mov reg, imm32`,
+     * which then feeds further constant propagation downstream.
+     *
+     * Only img->text_vaddr's range qualifies, and the exclusions matter: the
+     * R+W segment holds .data.rel.ro and the GOT, which the loader rewrites
+     * during relocation. The one thing that DOES write into this range is
+     * game/patches.cpp, and it is safe because it runs before the first Jit
+     * exists -- no block can have been translated yet. Anything that patched
+     * guest code later would have to invalidate the JIT's cache anyway. */
+    bool IsReadOnlyMemory(std::uint32_t vaddr) override;
+
+    /* Instruction fetch, overridden for ONE reason: to make a call through a
+     * null function pointer fail loudly instead of looking like a success.
+     *
+     * Guest low memory is zeroed, and a zero word decodes as `ANDEQ r0,r0,r0`
+     * -- a NOP. So `BLX r3` with r3 == 0 does not fault: it runs from address 0
+     * through ~1024 NOPs until it reaches the trampoline table at 0x1000, whose
+     * index 0 is the "$halt" sentinel, and CallSVC(0) then reports the call as
+     * having RETURNED NORMALLY. The whole remainder of the guest function is
+     * skipped and every log line says success.
+     *
+     * That is not a hypothetical: it is how a dead vtable dispatch inside the
+     * 9.6.1 app constructor hid for an entire debugging session -- a
+     * `Native_applicationWillFinishLaunching returned, halt_reason=0x01000000`
+     * that had in fact died somewhere in the middle, leaving the app driver
+     * unpublished and every later frame drawing nothing. The fixed ~1052 ticks
+     * of an "empty" onDrawFrame are the same slide, counted.
+     *
+     * Nothing legitimate executes below trampoline_base (0x1000): the SVC stubs
+     * start there, the fake JNIEnv is at 0x7000 and the guest stack at
+     * kStackTop. So refusing to fetch code from that page costs nothing and
+     * turns the silent slide into a NoExecuteFault carrying the faulting PC and
+     * the LR of the call site. Returning nullopt rather than an undefined
+     * instruction keeps the distinction: this address holds no code at all.
+     *
+     * Only code fetch is refused -- the data callbacks still treat the page as
+     * ordinary zeroed memory, because reading through a null pointer is common
+     * in guest code that then checks the result, and turning those into faults
+     * would break booting. */
+    std::optional<std::uint32_t> MemoryReadCode(std::uint32_t vaddr) override;
+
     void InterpreterFallback(std::uint32_t pc, size_t num_instructions) override;
     void CallSVC(std::uint32_t swi) override;
     void ExceptionRaised(std::uint32_t pc, Dynarmic::A32::Exception exception) override;
@@ -255,12 +304,33 @@ private:
  * The Env has to live exactly as long: UserConfig::callbacks is captured at
  * construction and cannot be repointed, so per-call state is cleared with
  * begin_call() instead of by rebuilding the object. Declaration order matters
- * -- `env` must be constructed before `jit` takes its address. */
+ * -- `env` must be constructed before `jit` takes its address.
+ *
+ * `count_cycles` chooses whether this context pays for tick accounting, and it
+ * is not a small bill. With it on, dynarmic wraps EVERY SVC in two extra
+ * devirtualized host calls (AddTicks before, GetTicksRemaining after) plus a
+ * pair of MXCSR switches -- so one guest import costs three host calls instead
+ * of one, on a boot that issues hundreds of millions of them -- and decrements
+ * a counter at the end of every basic block.
+ *
+ * Only the main context needs any of that. It is the one whose Run() has to
+ * return periodically so the window keeps pumping messages (see
+ * run_jit_sliced), the one the PC sampler and hot-window diagnostics read, and
+ * the only one the runaway tick budget still applies to. Spawned threads and
+ * nested callbacks run to completion inside run_nested() without pumping
+ * anything, and AddTicks() already refuses to enforce the budget on a spawned
+ * thread, so for them the accounting was pure overhead.
+ *
+ * What is given up: a nested callback that loops forever now hangs instead of
+ * being halted by the budget. That guard was a debugging convenience -- the
+ * same loop hangs the game on a real device -- and flipping this argument back
+ * to true restores it. */
 struct GuestThreadCtx {
     Pvz2Env env;
     Dynarmic::A32::Jit jit;
 
-    GuestThreadCtx(pvz2_elf_image_t *img, GuestRuntime *rt, size_t processor_id);
+    GuestThreadCtx(pvz2_elf_image_t *img, GuestRuntime *rt, size_t processor_id,
+                   bool count_cycles = true);
 };
 
 /* The synchronous top-level calls (.init_array, JNI_OnLoad, every registered
@@ -301,7 +371,14 @@ Dynarmic::HaltReason run_jit_sliced(Dynarmic::A32::Jit &jit, Pvz2Env &env);
 /* --- session-wide setup ----------------------------------------------------- */
 
 /* Must precede the first Jit: UserConfig captures the page table pointer at
- * construction, and the Jits are long-lived. */
+ * construction, and the Jits are long-lived.
+ *
+ * Every entry holds img->mem itself rather than img->mem + page_base, which
+ * pairs with UserConfig::absolute_offset_page_table: the JIT then indexes
+ * page_table[vaddr >> 12][vaddr] instead of [vaddr >> 12][vaddr & 0xFFF],
+ * dropping two instructions AND a scratch register from every emitted guest
+ * load and store. The two must agree -- an entry of img->mem + page_base with
+ * the flag on would read one page further for every page. */
 void build_page_table(pvz2_elf_image_t *img);
 
 /* Drops a page back onto the callback path so the MemoryWrite callbacks -- and
@@ -363,6 +440,15 @@ struct CallStats {
     std::uint32_t jni_calls = 0;
     std::uint64_t ticks = 0;
     double ms = 0.0;
+
+    /* r0 as the call left it -- the return value, for the natives that HAVE one.
+     * Most lifecycle natives are void and this is then whatever the body last
+     * put in r0, so it is only meaningful where the JNI signature says so.
+     *
+     * Read it together with the "did NOT return" warning above: a call that
+     * halted early leaves a plausible r0 that never came from a `return`
+     * statement, which is the same lie that line exists to catch. */
+    std::uint32_t result = 0;
 };
 const CallStats &last_call_stats();
 

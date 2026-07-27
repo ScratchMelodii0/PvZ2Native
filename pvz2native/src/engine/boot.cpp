@@ -17,12 +17,11 @@ void boot_native_library(pvz2_elf_image_t *img, GuestRuntime *rt) {
 }
 
 void run_eaframework_startup(pvz2_elf_image_t *img, GuestRuntime *rt) {
-    /* Scratch area for fabricated argument payloads (fake jstring bytes, etc.),
-     * well clear of the trampoline/JNI-table region. EAIO's startup needs a
-     * live jstring for its documents path. */
-    constexpr std::uint32_t kScratchAddr = 0x00009000;
+    /* EAIO's startup needs a live jstring for its documents path. It goes in the
+     * scratch area, which runtime/guest_memmap.h keeps clear of the trampoline and
+     * JNI-table regions. */
     const std::uint32_t documents_path =
-        rt_::make_fake_jstring(img, kScratchAddr, "/pvz2native/documents");
+        rt_::make_fake_jstring(img, rt_::memmap::kScratchAddr, "/pvz2native/documents");
 
     rt_::run_export(img, rt, "Java_com_ea_EAThread_EAThread_Init");
     rt_::run_export(img, rt, "Java_com_ea_EAIO_EAIO_StartupNativeImpl", documents_path);

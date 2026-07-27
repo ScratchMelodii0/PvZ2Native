@@ -16,6 +16,7 @@
 
 #include <pvz2native/elf32/elf32_loader.h>
 #include <pvz2native/runtime/guest_heap.h>
+#include <pvz2native/runtime/guest_memmap.h>
 #include <pvz2native/runtime/guest_sync.h>
 #include <pvz2native/runtime/guest_zlib.h>
 #include <pvz2native/runtime/rsb_index.h>
@@ -32,10 +33,10 @@ constexpr size_t kMonitorProcessorCount = kThreadStackMax + 2;
 /* Bump allocator for opaque JNI "handles" (jclass/jmethodID/jfieldID/...):
  * the guest never dereferences these as real memory, only passes them back
  * into other JNI calls, so a unique non-null address is all that's needed.
- * Carved out of the small gap between the trampoline table and the JNI
- * vtable (see elf32_loader.c's PVZ2_TRAMPOLINE_BASE/MAX). */
-constexpr uint32_t kFakeHandleBase = 0x00005000;
-constexpr uint32_t kFakeHandleEnd = 0x00005800;
+ * Carved out of the gap between the trampoline table and the JNI vtable --
+ * runtime/guest_memmap.h owns that layout and checks the fit. */
+using runtime::memmap::kFakeHandleBase;
+using runtime::memmap::kFakeHandleEnd;
 
 /* Guest FILE* tokens: opaque cookies the guest only ever hands back to
  * stdio calls (never dereferences), kept well outside the guest address
@@ -76,6 +77,9 @@ struct GuestRuntime {
 
     std::mutex sems_lock;
     std::unordered_map<uint32_t, std::unique_ptr<GuestSem>> guest_sems;
+
+    std::mutex rwlocks_lock;
+    std::unordered_map<uint32_t, std::unique_ptr<GuestRwLock>> guest_rwlocks;
 
     std::mutex once_lock;
     std::unordered_map<uint32_t, bool> once_done;
@@ -152,6 +156,7 @@ struct GuestRuntime {
     GuestMutex *get_or_create_mutex(uint32_t addr);
     GuestCond *get_or_create_cond(uint32_t addr);
     GuestSem *get_or_create_sem(uint32_t addr);
+    GuestRwLock *get_or_create_rwlock(uint32_t addr);
 };
 
 }  // namespace pvz2native

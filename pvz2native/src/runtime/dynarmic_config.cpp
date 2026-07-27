@@ -33,10 +33,6 @@ std::atomic<pvz2_host_pump_fn> g_host_pump{nullptr};
 std::mutex g_status_lock;
 char g_status[160] = "starting";
 
-/* The guest surface size, chosen at startup -- see set_window_size. */
-std::uint32_t g_window_w = 960;
-std::uint32_t g_window_h = 540;
-
 /* Memory watchpoint state -- see watch_arm. */
 std::uint32_t g_watch_lo = 0;
 std::uint32_t g_watch_hi = 0;
@@ -84,7 +80,7 @@ std::unique_ptr<Pvz2PageTable> g_page_table;
 std::unique_ptr<GuestThreadCtx> g_main_ctx;
 
 Dynarmic::A32::UserConfig make_arm_user_config(GuestRuntime *rt, Pvz2Env *env,
-                                               size_t processor_id) {
+                                               size_t processor_id, bool count_cycles) {
     Dynarmic::A32::UserConfig config;
     config.callbacks = env;
     config.global_monitor = &rt->monitor;
@@ -92,6 +88,17 @@ Dynarmic::A32::UserConfig make_arm_user_config(GuestRuntime *rt, Pvz2Env *env,
     /* Inline guest memory accesses -- see build_page_table(). Null (the config
      * opt-out) simply leaves every access on the callback path. */
     config.page_table = g_page_table.get();
+    /* Every entry is img->mem, so the offset within the "page" is the whole
+     * guest address. Saves a `mov`+`and` and, more usefully, the second scratch
+     * register the JIT would otherwise reserve for the masked offset in every
+     * load and store it emits. Set together with build_page_table(); see there. */
+    config.absolute_offset_page_table = true;
+
+    /* Tick accounting, and whether this context is worth its price -- see
+     * GuestThreadCtx. Off means AddTicks/GetTicksRemaining are never called, so
+     * Run() returns only when something halts it, which is exactly how
+     * run_nested() drives worker threads and nested callbacks anyway. */
+    config.enable_cycle_counting = count_cycles;
 
     /* All of dynarmic's SAFE optimizations: block linking, the return-stack
      * buffer, the fast dispatcher, and the IR passes. It is already the library
@@ -122,13 +129,6 @@ void set_slice_override(std::uint32_t ticks) {
 }
 
 void set_host_pump(pvz2_host_pump_fn fn) { g_host_pump.store(fn, std::memory_order_relaxed); }
-
-std::uint32_t window_width() { return g_window_w; }
-std::uint32_t window_height() { return g_window_h; }
-void set_window_size(std::uint32_t w, std::uint32_t h) {
-    if (w > 0) g_window_w = w;
-    if (h > 0) g_window_h = h;
-}
 
 void set_status(const char *fmt, ...) {
     char buf[160];
@@ -182,7 +182,11 @@ void build_page_table(pvz2_elf_image_t *img) {
     g_page_table->fill(nullptr);
     std::uint32_t mapped = 0;
     for (std::uint64_t addr = 0; addr + kPageSize <= img->mem_size; addr += kPageSize) {
-        (*g_page_table)[addr >> Dynarmic::A32::UserConfig::PAGE_BITS] = img->mem + addr;
+        /* img->mem, NOT img->mem + addr: absolute_offset_page_table is on, so
+         * the JIT adds the full guest address to whatever it finds here. The
+         * entry still doubles as the mapped/unmapped flag, which is what keeps
+         * unmap_page_for_watch() and the out-of-bounds fallback working. */
+        (*g_page_table)[addr >> Dynarmic::A32::UserConfig::PAGE_BITS] = img->mem;
         ++mapped;
     }
     std::printf("pvz2: guest memory mapped directly into the JIT (%u pages, %u MB)\n", mapped,
@@ -217,7 +221,12 @@ HeapLayout heap_layout_for(const pvz2_elf_image_t *img) {
     constexpr std::uint32_t kFloor = 0x01000000;
     constexpr std::uint32_t kGranularity = 0x00100000; /* 1MB */
 
-    const std::uint32_t image_end = img->so_base + img->so_span;
+    /* Past the LAST module, not the main image: dependencies (libc++_shared,
+     * libNimble) are mapped after libPVZ2, so so_base + so_span would put the
+     * heap on top of them. images_end is 0 only for an image that was never
+     * loaded, in which case the old expression is still the right answer. */
+    const std::uint32_t image_end =
+        img->images_end != 0 ? img->images_end : img->so_base + img->so_span;
     std::uint32_t base = (image_end + kGranularity - 1) & ~(kGranularity - 1);
     if (base < kFloor) base = kFloor;
 
@@ -309,6 +318,31 @@ bool Pvz2Env::MemoryWriteExclusive32(std::uint32_t vaddr, std::uint32_t value, s
 bool Pvz2Env::MemoryWriteExclusive64(std::uint32_t vaddr, std::uint64_t value, std::uint64_t) {
     MemoryWrite64(vaddr, value);
     return true;
+}
+
+/* See the declaration for why this is worth answering. Translation-time only,
+ * so the cost of computing it per call does not matter; correctness does, and
+ * the range comes from the ELF program headers rather than a guessed constant. */
+bool Pvz2Env::IsReadOnlyMemory(std::uint32_t vaddr) {
+    if (img == nullptr) return false;
+    /* One range per mapped module. A union across modules would be wrong -- the
+     * gap between two modules is unmapped, and folding a load from it would turn
+     * a wild read into a silent constant instead of a zero. */
+    for (std::uint32_t i = 0; i < img->module_count; ++i) {
+        const pvz2_elf_module_t &m = img->modules[i];
+        if (m.text_size == 0) continue;
+        const std::uint32_t lo = m.base + m.text_vaddr;
+        if (vaddr >= lo && vaddr < lo + m.text_size) return true;
+    }
+    return false;
+}
+
+/* See the header for why this exists: without it, a call through a null
+ * function pointer NOP-slides from address 0 into the "$halt" sentinel and is
+ * reported as a clean return. */
+std::optional<std::uint32_t> Pvz2Env::MemoryReadCode(std::uint32_t vaddr) {
+    if (img != nullptr && vaddr < img->trampoline_base) return std::nullopt;
+    return MemoryRead32(vaddr);
 }
 
 void Pvz2Env::InterpreterFallback(std::uint32_t pc, size_t num_instructions) {
@@ -481,9 +515,35 @@ void Pvz2Env::ExceptionRaised(std::uint32_t pc, Dynarmic::A32::Exception excepti
     auto &regs = jit->Regs();
     {
         std::lock_guard<std::mutex> lg(rt->log_lock);
-        std::printf("pvz2: exception %d raised at pc=0x%08x lr=0x%08x r0=0x%08x r1=0x%08x "
-                    "r2=0x%08x r3=0x%08x -- halting\n",
-                    static_cast<int>(exception), pc, regs[14], regs[0], regs[1], regs[2], regs[3]);
+        /* NoExecuteFault below the trampoline table is MemoryReadCode refusing
+         * the null page, and it has exactly one cause worth naming: the guest
+         * branched through a function pointer that was never filled in --
+         * almost always a vtable slot on an object that is still zeroed, or an
+         * object that was never constructed at all. LR is the call site, so it
+         * names the caller directly; pc is null plus whatever field offset the
+         * dispatch added, which identifies the slot. */
+        if (exception == Dynarmic::A32::Exception::NoExecuteFault && img != nullptr &&
+            pc < img->trampoline_base) {
+            /* One line per distinct call site. A dead vtable slot is almost
+             * always reached from onDrawFrame, so without this the first
+             * occurrence -- the one during boot that explains the rest -- is
+             * pushed out of the console by thousands of identical frames. */
+            static std::set<std::uint64_t> seen;
+            if (seen.insert(((std::uint64_t)pc << 32) | regs[14]).second) {
+                std::printf("pvz2: [NULL CALL] the guest branched to 0x%08x -- a null/uninitialised "
+                            "function pointer, called from lr=0x%08x (offset 0x%x). r0=0x%08x "
+                            "r1=0x%08x r2=0x%08x r3=0x%08x -- halting (this call site is "
+                            "reported once)\n",
+                            pc, regs[14],
+                            regs[14] >= img->so_base ? regs[14] - img->so_base : regs[14],
+                            regs[0], regs[1], regs[2], regs[3]);
+            }
+        } else {
+            std::printf("pvz2: exception %d raised at pc=0x%08x lr=0x%08x r0=0x%08x r1=0x%08x "
+                        "r2=0x%08x r3=0x%08x -- halting\n",
+                        static_cast<int>(exception), pc, regs[14], regs[0], regs[1], regs[2],
+                        regs[3]);
+        }
     }
     should_halt = true;
     jit->HaltExecution();
@@ -548,8 +608,9 @@ std::uint64_t Pvz2Env::GetTicksRemaining() {
 
 /* --- contexts and call setup ------------------------------------------------ */
 
-GuestThreadCtx::GuestThreadCtx(pvz2_elf_image_t *img, GuestRuntime *rt, size_t processor_id)
-    : jit(make_arm_user_config(rt, &env, processor_id)) {
+GuestThreadCtx::GuestThreadCtx(pvz2_elf_image_t *img, GuestRuntime *rt, size_t processor_id,
+                               bool count_cycles)
+    : jit(make_arm_user_config(rt, &env, processor_id, count_cycles)) {
     env.img = img;
     env.rt = rt;
     env.jit = &jit;
@@ -697,7 +758,11 @@ std::uint32_t Pvz2Env::hook_call_guest(void *env, std::uint32_t fn, const std::u
 
     if (nested_depth == 0) {
         if (!nested_ctx) {
-            nested_ctx = std::make_unique<GuestThreadCtx>(outer->img, rt, guest_tls::self_id);
+            /* No cycle counting: run_nested() drives this to completion in one
+             * go, nothing samples it, and the per-SVC tick bookkeeping would
+             * triple the host-call cost of a comparator called once per
+             * comparison. See GuestThreadCtx. */
+            nested_ctx = std::make_unique<GuestThreadCtx>(outer->img, rt, guest_tls::self_id, false);
         }
         Pvz2Env &inner = nested_ctx->env;
         inner.begin_call();
@@ -708,12 +773,14 @@ std::uint32_t Pvz2Env::hook_call_guest(void *env, std::uint32_t fn, const std::u
         --nested_depth;
 
         /* The nested call's ticks are the outer call's ticks: it is the same
-         * guest thread doing the work, and the budget bounds total execution. */
+         * guest thread doing the work, and the budget bounds total execution.
+         * Now always 0, since the nested context does not count cycles -- kept
+         * so the accounting is right again the moment that is turned back on. */
         outer->ticks_used += inner.ticks_used;
         return nested_ctx->jit.Regs()[0];
     }
 
-    GuestThreadCtx deep(outer->img, rt, guest_tls::self_id);
+    GuestThreadCtx deep(outer->img, rt, guest_tls::self_id, false);
     apply_call_setup(deep.jit, deep.env, outer->img, setup);
 
     ++nested_depth;
@@ -743,8 +810,14 @@ std::uint32_t Pvz2Env::spawn_guest_thread_impl(GuestRuntime *rt, std::uint32_t s
     std::thread th([rt, start_routine, arg, stack_top, id]() {
         guest_tls::self_id = id;
         /* One Jit for the whole life of the thread -- it only ever runs this one
-         * entry point, but hook_call_guest may reuse the context too. */
-        GuestThreadCtx ctx(rt->img, rt, id);
+         * entry point, but hook_call_guest may reuse the context too.
+         *
+         * No cycle counting: AddTicks() already refuses to enforce the budget on
+         * a spawned thread (halting one killed the audio), and nothing here
+         * pumps the window or samples the PC, so the accounting bought nothing
+         * while charging two extra host calls per import -- on precisely the
+         * threads that run for the whole session. */
+        GuestThreadCtx ctx(rt->img, rt, id, false);
         Pvz2Env &env = ctx.env;
         Dynarmic::A32::Jit &jit = ctx.jit;
         auto &regs = jit.Regs();
@@ -826,33 +899,64 @@ std::uint32_t make_fake_jstring(pvz2_elf_image_t *img, std::uint32_t addr, const
  * constructed -- root cause of the AndroidAppEvent list in onDrawFrame spinning
  * forever copying from a never-self-initialised sentinel. Called with
  * argc=argv=envp=0 like a minimal libc startup would. */
+namespace {
+
+/* One constructor entry, called the way a minimal libc startup would. */
+void run_one_ctor(pvz2_elf_image_t *img, GuestRuntime *rt, std::uint32_t entry_addr,
+                  const char *what, const char *module, std::uint32_t i) {
+    GuestThreadCtx &ctx = main_ctx(img, rt);
+    GuestCallSetup setup;
+    setup.r0 = 0; /* argc */
+    setup.r1 = 0; /* argv */
+    setup.r2 = 0; /* envp */
+    setup.sp = kStackTop;
+    setup.lr = img->trampoline_base; /* LR -> "$halt" sentinel */
+    setup.entry_pc = entry_addr;
+    apply_call_setup(ctx.jit, ctx.env, img, setup);
+
+    Dynarmic::HaltReason hr = run_jit_sliced(ctx.jit, ctx.env);
+    if (verbose_boot()) {
+        std::printf("pvz2: %s %s[%u] (0x%08x) returned, halt_reason=0x%08x, import_calls=%u\n",
+                    module, what, i, entry_addr, static_cast<unsigned>(hr), ctx.env.import_calls);
+    }
+}
+
+}  // namespace
+
 void run_init_array(pvz2_elf_image_t *img, GuestRuntime *rt) {
-    if (img->init_array_count == 0) {
+    /* Every mapped module, in dependency order: libc++_shared.so's single
+     * constructor has to have run before libPVZ2.so's 1044 do, or the engine's
+     * first use of a libc++ global (a locale, an iostream) touches uninitialised
+     * memory. init_order is the loader's post-order over DT_NEEDED; for a
+     * single-module image it is just {0}, which is the old behaviour exactly.
+     *
+     * DT_INIT runs before DT_INIT_ARRAY within a module, as the ELF spec
+     * requires -- libPVZ2 has none, but the NDK's libc++_shared does. */
+    std::uint32_t total = 0;
+    for (std::uint32_t k = 0; k < img->module_count; ++k) {
+        total += img->modules[k].init_array_count;
+    }
+    if (total == 0 && img->module_count <= 1) {
         std::printf("pvz2: no .init_array entries, skipping\n");
         return;
     }
-    std::printf("pvz2: ---- running %u .init_array constructor(s) ----\n", img->init_array_count);
-    for (std::uint32_t i = 0; i < img->init_array_count; ++i) {
-        std::uint32_t entry_addr = 0;
-        std::memcpy(&entry_addr, &img->mem[img->so_base + img->init_array_vaddr + i * 4], 4);
-        if (entry_addr == 0 || entry_addr == 0xFFFFFFFFu) continue; /* some toolchains pad with -1 */
-        set_status("booting: static constructors %u/%u", i + 1, img->init_array_count);
+    std::printf("pvz2: ---- running %u constructor(s) across %u module(s) ----\n", total,
+                img->module_count);
 
-        GuestThreadCtx &ctx = main_ctx(img, rt);
-        GuestCallSetup setup;
-        setup.r0 = 0; /* argc */
-        setup.r1 = 0; /* argv */
-        setup.r2 = 0; /* envp */
-        setup.sp = kStackTop;
-        setup.lr = img->trampoline_base; /* LR -> "$halt" sentinel */
-        setup.entry_pc = entry_addr;
-        apply_call_setup(ctx.jit, ctx.env, img, setup);
+    std::uint32_t done = 0;
+    for (std::uint32_t k = 0; k < img->module_count; ++k) {
+        const pvz2_elf_module_t &m = img->modules[img->init_order[k]];
 
-        Dynarmic::HaltReason hr = run_jit_sliced(ctx.jit, ctx.env);
-        if (verbose_boot()) {
-            std::printf("pvz2: .init_array[%u] (0x%08x) returned, halt_reason=0x%08x, "
-                        "import_calls=%u\n", i, entry_addr, static_cast<unsigned>(hr),
-                        ctx.env.import_calls);
+        if (m.init_vaddr != 0) {
+            run_one_ctor(img, rt, m.base + m.init_vaddr, "DT_INIT", m.name, 0);
+        }
+        for (std::uint32_t i = 0; i < m.init_array_count; ++i) {
+            std::uint32_t entry_addr = 0;
+            std::memcpy(&entry_addr, &img->mem[m.base + m.init_array_vaddr + i * 4], 4);
+            ++done;
+            if (entry_addr == 0 || entry_addr == 0xFFFFFFFFu) continue; /* some toolchains pad with -1 */
+            set_status("booting: static constructors %u/%u", done, total);
+            run_one_ctor(img, rt, entry_addr, ".init_array", m.name, i);
         }
     }
 }
@@ -863,29 +967,58 @@ void run_init_array(pvz2_elf_image_t *img, GuestRuntime *rt) {
  * after System.loadLibrary(), before any other native call. Skipping it left
  * the JavaVM and method-ID cache it allocates NULL for the whole process,
  * silently breaking every later call that re-derives a JNIEnv* via
- * JavaVM->GetEnv() instead of using the one handed to it. */
+ * JavaVM->GetEnv() instead of using the one handed to it.
+ *
+ * Run for EVERY module that exports one, not just libPVZ2.so. JNI_OnLoad is a
+ * per-library entry point: each .so keeps its OWN JavaVM* in its OWN global, and
+ * Android calls each library's as that library is loaded. Running only the main
+ * image's is the same bug as skipping it entirely, just confined to the
+ * dependencies -- and it cost a long hunt: libNimble.so's
+ * EA::Nimble::getEnv() calls (*vm)->GetEnv(vm, &env, JNI_VERSION_1_6) with a vm
+ * that only ITS JNI_OnLoad ever assigns, so the guest branched to 0 and halted
+ * ~230 words deep inside applicationWillFinishLaunching. That aborted the
+ * framework's main before its tail, which is the ONLY code that publishes the
+ * AndroidAppDriver -- so the whole boot then ran with a NULL driver global and
+ * drew nothing, several layers away from the cause.
+ *
+ * In init_order, i.e. dependency before dependent -- the same order the
+ * constructors ran in, and the order the Java side would load them. */
 void run_jni_onload(pvz2_elf_image_t *img, GuestRuntime *rt) {
-    std::uint32_t entry_addr = pvz2_elf_find_symbol(img, "JNI_OnLoad");
-    if (entry_addr == 0) {
-        std::printf("pvz2: symbol 'JNI_OnLoad' not found, skipping\n");
-        return;
+    unsigned ran = 0;
+    for (std::uint32_t i = 0; i < img->module_count; ++i) {
+        const pvz2_elf_module_t &m = img->modules[img->init_order[i]];
+        const std::uint32_t entry_addr = pvz2_elf_find_symbol_in(&m, "JNI_OnLoad");
+        if (entry_addr == 0) continue; /* most libraries have none -- normal */
+
+        std::printf("pvz2: ---- running JNI_OnLoad [%s] at 0x%08x ----\n", m.name, entry_addr);
+
+        GuestThreadCtx &ctx = main_ctx(img, rt);
+        GuestCallSetup setup;
+        setup.r0 = dex::kJavaVmPtrAddr; /* JavaVM* vm */
+        setup.r1 = 0;                   /* void* reserved */
+        setup.sp = kStackTop;
+        setup.lr = img->trampoline_base;
+        setup.entry_pc = entry_addr;
+        apply_call_setup(ctx.jit, ctx.env, img, setup);
+
+        Dynarmic::HaltReason hr = run_jit_sliced(ctx.jit, ctx.env);
+        const std::uint32_t ret = ctx.jit.Regs()[0];
+        std::printf("pvz2: JNI_OnLoad [%s] returned 0x%08x, halt_reason=0x%08x, import_calls=%u, "
+                    "jni_calls=%u, ticks_used=%llu\n",
+                    m.name, ret, static_cast<unsigned>(hr), ctx.env.import_calls,
+                    ctx.env.jni_calls, (unsigned long long)ctx.env.ticks_used);
+
+        /* It returns the JNI version it wants, or JNI_ERR. A library that
+         * refuses here has NOT set up its globals, and every later call into it
+         * dereferences them -- so say it now rather than let it surface as a
+         * null branch somewhere unrelated. */
+        if ((std::int32_t)ret < 0) {
+            std::printf("pvz2: [!] %s's JNI_OnLoad failed (JNI_ERR) -- its JavaVM and any cached "
+                        "classes are unset; calls into it will branch through NULL\n", m.name);
+        }
+        ++ran;
     }
-    std::printf("pvz2: ---- running JNI_OnLoad at 0x%08x ----\n", entry_addr);
-
-    GuestThreadCtx &ctx = main_ctx(img, rt);
-    GuestCallSetup setup;
-    setup.r0 = dex::kJavaVmPtrAddr; /* JavaVM* vm */
-    setup.r1 = 0;                   /* void* reserved */
-    setup.sp = kStackTop;
-    setup.lr = img->trampoline_base;
-    setup.entry_pc = entry_addr;
-    apply_call_setup(ctx.jit, ctx.env, img, setup);
-
-    Dynarmic::HaltReason hr = run_jit_sliced(ctx.jit, ctx.env);
-    std::printf("pvz2: JNI_OnLoad returned, halt_reason=0x%08x, import_calls=%u, jni_calls=%u, "
-                "ticks_used=%llu\n",
-                static_cast<unsigned>(hr), ctx.env.import_calls, ctx.env.jni_calls,
-                (unsigned long long)ctx.env.ticks_used);
+    if (ran == 0) std::printf("pvz2: symbol 'JNI_OnLoad' not found in any module, skipping\n");
 }
 
 void run_export(pvz2_elf_image_t *img, GuestRuntime *rt, const char *entry_name,
@@ -948,7 +1081,32 @@ void run_guest_call(pvz2_elf_image_t *img, GuestRuntime *rt, const char *label,
     auto t0 = std::chrono::steady_clock::now();
     Dynarmic::HaltReason hr = run_jit_sliced(ctx.jit, ctx.env);
     const double ms = ms_since(t0);
-    g_last_call_stats = {ctx.env.import_calls, ctx.env.jni_calls, ctx.env.ticks_used, ms};
+    g_last_call_stats = {ctx.env.import_calls, ctx.env.jni_calls, ctx.env.ticks_used, ms,
+                         ctx.jit.Regs()[0]};
+
+    /* Did it actually return? A guest function that runs to its own `BX lr`
+     * pops its frame first, so SP comes back to exactly the value set up here.
+     * Anything else reached the halt sentinel by another route -- the classic
+     * one being a branch into unmapped or uninitialised memory that slid into
+     * the trampoline table (see MemoryReadCode) -- and the "returned" line
+     * below would otherwise report a half-executed function as a success.
+     * Said regardless of per_frame -- a frame that stops early is the single
+     * most expensive thing to misread in this emulator -- but only ONCE per
+     * label: onDrawFrame failing this way fails it every frame, and the flood
+     * buries the boot-time occurrence that caused it. */
+    if (ctx.jit.Regs()[13] != setup.sp) {
+        /* Keyed on the ENTRY OFFSET, not on `label`: the per-frame callers
+         * build labels like "Native_onDrawFrame[3076]", so a label-keyed set
+         * never matches twice and dedupes nothing. */
+        static std::set<std::uint32_t> seen;
+        if (seen.insert(offset).second) {
+            std::printf("pvz2: [!] %s did NOT return -- it halted with sp=0x%08x, expected 0x%08x "
+                        "(%u words deep). Any 'returned' line for it is a return that did not "
+                        "happen; everything after the halt point never ran. (reported once)\n",
+                        label, ctx.jit.Regs()[13], setup.sp,
+                        (unsigned)((setup.sp - ctx.jit.Regs()[13]) / 4));
+        }
+    }
     if (chatty) {
         std::printf("pvz2: %s returned, halt_reason=0x%08x, import_calls=%u, jni_calls=%u, "
                     "ticks_used=%llu, ms=%.1f\n",
@@ -963,21 +1121,6 @@ void run_at_offset(pvz2_elf_image_t *img, GuestRuntime *rt, const char *label,
                    std::uint32_t offset, const std::vector<std::uint32_t> &extra_args,
                    bool per_frame) {
     run_guest_call(img, rt, label, offset, dex::kJniEnvPtrAddr, extra_args, per_frame);
-}
-
-std::uint32_t call_guest_quiet(pvz2_elf_image_t *img, GuestRuntime *rt, std::uint32_t offset,
-                               std::uint32_t r0, std::uint32_t r1, std::uint32_t r2) {
-    GuestThreadCtx &ctx = main_ctx(img, rt);
-    GuestCallSetup setup;
-    setup.r0 = r0;
-    setup.r1 = r1;
-    setup.r2 = r2;
-    setup.sp = kStackTop;
-    setup.lr = img->trampoline_base; /* LR -> "$halt" sentinel */
-    setup.entry_pc = img->so_base + offset;
-    apply_call_setup(ctx.jit, ctx.env, img, setup);
-    run_nested(ctx.jit, ctx.env);
-    return ctx.jit.Regs()[0];
 }
 
 std::uint32_t call_guest_quiet_args(pvz2_elf_image_t *img, GuestRuntime *rt, std::uint32_t offset,
@@ -995,6 +1138,15 @@ std::uint32_t call_guest_quiet_args(pvz2_elf_image_t *img, GuestRuntime *rt, std
     apply_call_setup(ctx.jit, ctx.env, img, setup);
     run_nested(ctx.jit, ctx.env);
     return ctx.jit.Regs()[0];
+}
+
+/* The three-register form, which is the shape most callers want. It was a second
+ * copy of the body above until the only difference left was how the arguments
+ * arrive. */
+std::uint32_t call_guest_quiet(pvz2_elf_image_t *img, GuestRuntime *rt, std::uint32_t offset,
+                               std::uint32_t r0, std::uint32_t r1, std::uint32_t r2) {
+    const std::uint32_t args[3] = {r0, r1, r2};
+    return call_guest_quiet_args(img, rt, offset, args, 3);
 }
 
 }  // namespace runtime

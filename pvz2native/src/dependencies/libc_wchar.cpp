@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+#include <pvz2native/dependencies/libc_internal.h>
+
 namespace pvz2native {
 namespace {
 
@@ -42,27 +44,9 @@ void c_wcslen(GuestCall &c) {
     c.set_result(len);
 }
 
-void c_wcscmp(GuestCall &c) {
-    std::uint32_t a = c.arg(0), b = c.arg(1);
-    int result = 0;
-    for (std::uint32_t i = 0;; ++i) {
-        std::uint32_t ca = c.read32(a + i * 4), cb = c.read32(b + i * 4);
-        if (ca != cb) { result = ca < cb ? -1 : 1; break; }
-        if (ca == 0) break;
-    }
-    c.set_result((std::uint32_t)result);
-}
-
-void c_wcsncmp(GuestCall &c) {
-    std::uint32_t a = c.arg(0), b = c.arg(1), n = c.arg(2);
-    int result = 0;
-    for (std::uint32_t i = 0; i < n; ++i) {
-        std::uint32_t ca = c.read32(a + i * 4), cb = c.read32(b + i * 4);
-        if (ca != cb) { result = ca < cb ? -1 : 1; break; }
-        if (ca == 0) break;
-    }
-    c.set_result((std::uint32_t)result);
-}
+/* The comparison loop itself is shared -- see libc/compare_wide. */
+void c_wcscmp(GuestCall &c) { libc::compare_wide(c, libc::kUnbounded, true); }
+void c_wcsncmp(GuestCall &c) { libc::compare_wide(c, c.arg(2), true); }
 
 void c_wcschr(GuestCall &c) {
     std::uint32_t s = c.arg(0), want = c.arg(1);
@@ -191,15 +175,9 @@ void c_wmemset(GuestCall &c) {
     c.set_result(dst);
 }
 
-void c_wmemcmp(GuestCall &c) {
-    std::uint32_t a = c.arg(0), b = c.arg(1), n = c.arg(2);
-    int result = 0;
-    for (std::uint32_t i = 0; i < n; ++i) {
-        std::uint32_t ca = c.read32(a + i * 4), cb = c.read32(b + i * 4);
-        if (ca != cb) { result = ca < cb ? -1 : 1; break; }
-    }
-    c.set_result((std::uint32_t)result);
-}
+/* Same loop as wcsncmp but without the NUL stop: wmemcmp compares n elements
+ * whatever they are. */
+void c_wmemcmp(GuestCall &c) { libc::compare_wide(c, c.arg(2), false); }
 
 void c_wmemchr(GuestCall &c) {
     std::uint32_t s = c.arg(0), want = c.arg(1), n = c.arg(2);
@@ -248,6 +226,16 @@ void c_mbrtowc(GuestCall &c) {
     c.set_result(b == 0 ? 0u : 1u);
 }
 
+/* size_t mbrlen(const char *s, size_t n, mbstate_t *ps) -- bytes in the next
+ * multibyte character. Single-byte throughout, to agree with c_mbrtowc above;
+ * answering anything else here would make the two disagree about where the next
+ * character starts. 0 for the terminator, as specified. */
+void c_mbrlen(GuestCall &c) {
+    const std::uint32_t s = c.arg(0), n = c.arg(1);
+    if (s == 0 || n == 0) { c.set_result(0); return; }
+    c.set_result(c.read8(s) == 0 ? 0u : 1u);
+}
+
 void c_btowc(GuestCall &c) {
     /* int -> wint_t: EOF stays WEOF, single bytes map identity. */
     c.set_result(c.arg(0) == 0xFFFFFFFFu ? 0xFFFFFFFFu : (c.arg(0) & 0xFFu));
@@ -292,6 +280,36 @@ void c_iswalpha(GuestCall &c) {
 void c_iswdigit(GuestCall &c) {
     int ch = ascii(c.arg(0));
     c.set_result(ch >= 0 && std::isdigit(ch) ? 1u : 0u);
+}
+
+void c_iswlower(GuestCall &c) {
+    int ch = ascii(c.arg(0));
+    c.set_result(ch >= 0 && std::islower(ch) ? 1u : 0u);
+}
+
+void c_iswupper(GuestCall &c) {
+    int ch = ascii(c.arg(0));
+    c.set_result(ch >= 0 && std::isupper(ch) ? 1u : 0u);
+}
+
+void c_iswpunct(GuestCall &c) {
+    int ch = ascii(c.arg(0));
+    c.set_result(ch >= 0 && std::ispunct(ch) ? 1u : 0u);
+}
+
+void c_iswcntrl(GuestCall &c) {
+    int ch = ascii(c.arg(0));
+    c.set_result(ch >= 0 && std::iscntrl(ch) ? 1u : 0u);
+}
+
+void c_iswprint(GuestCall &c) {
+    int ch = ascii(c.arg(0));
+    c.set_result(ch >= 0 && std::isprint(ch) ? 1u : 0u);
+}
+
+void c_iswxdigit(GuestCall &c) {
+    int ch = ascii(c.arg(0));
+    c.set_result(ch >= 0 && std::isxdigit(ch) ? 1u : 0u);
 }
 
 /* wctype() hands back an opaque class id that only iswctype() consumes, so the
@@ -368,6 +386,15 @@ void register_libc_wchar(ImportTable &t) {
     t.add("iswdigit", c_iswdigit);
     t.add("wctype", c_wctype);
     t.add("iswctype", c_iswctype);
+
+    /* Added for 9.6.1: libc++_shared's locale facets classify through these. */
+    t.add("iswlower", c_iswlower);
+    t.add("iswupper", c_iswupper);
+    t.add("iswpunct", c_iswpunct);
+    t.add("iswcntrl", c_iswcntrl);
+    t.add("iswprint", c_iswprint);
+    t.add("iswxdigit", c_iswxdigit);
+    t.add("mbrlen", c_mbrlen);
 }
 
 }  // namespace pvz2native

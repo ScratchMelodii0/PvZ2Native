@@ -38,10 +38,7 @@ std::string translate(GuestRuntime *rt, std::string p) {
      * so the bytes libc sees never carry it. Stripping it here is what unblocked
      * the RSB load: the engine logged "Loading main RSB from the path <obb>"
      * and then asked for "ASSET:<obb>", which no host open could satisfy. */
-    static const char kAssetScheme[] = "ASSET:";
-    if (p.compare(0, sizeof(kAssetScheme) - 1, kAssetScheme) == 0) {
-        p.erase(0, sizeof(kAssetScheme) - 1);
-    }
+    if (p.compare(0, kAssetSchemeLen, kAssetScheme) == 0) p.erase(0, kAssetSchemeLen);
     for (char &c : p) if (c == '\\') c = '/';
     /* Undo the leading slash obb_guest_path() carries to look absolute to the
      * engine: "/E:/..." is not a path the host can open. */

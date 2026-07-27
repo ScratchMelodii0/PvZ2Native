@@ -22,7 +22,15 @@ namespace pvz2native {
  *
  * 0 means "not mapped for this version". Callers must treat it as such:
  * `natives` are required and a missing one is a hard error, while a missing
- * diagnostic offset just turns that diagnostic off. */
+ * diagnostic offset just turns that diagnostic off.
+ *
+ * kVersions fills this in with DESIGNATED initialisers (.native = {...}), and a
+ * new entry must too. Every field here is an interchangeable uint32 offset, so a
+ * positional aggregate that omits one block -- or a member added in the middle of
+ * one -- shifts everything after it with nothing for the compiler to complain
+ * about; the symptom is a branch into the middle of an unrelated function. Naming
+ * each field makes an omitted one simply absent, and absent means 0, which is
+ * already the contract above. */
 struct GameSymbols {
     const char *version;
 
@@ -48,6 +56,45 @@ struct GameSymbols {
          * no error anywhere; the giveaway is a frame that costs the same ticks
          * every time and makes zero imports. */
         std::uint32_t pump_message_queue;
+
+        /* Native_createNativeApplicationLifecycleObserver: new in 9.6.1, 0 for
+         * 1.6 and 4.5.2. It is registered in a JNINativeMethod array of its own,
+         * so the Java side calls it explicitly during startup, and this build
+         * moved work there -- its Native_applicationDidFinishLaunching is now a
+         * bare `BX LR`, where 4.5.2's did something. Called right after
+         * GameAppInitialize, which is where Java constructs the observer.
+         *
+         * If a 9.6.1 boot misbehaves in the lifecycle, this speculative call is
+         * the first thing to try removing: the ORDER is inferred from the name
+         * and from what the natives around it became, not read off a trace. */
+        std::uint32_t create_lifecycle_observer;
+
+        /* Native_NotifySurfaceChange / NotifyAppRunning / NotifyFocusChange,
+         * each `(Z)V`. New in 9.6.1; 0 for 1.6 and 4.5.2, which have no such
+         * natives. On Android the activity calls them from its surface and
+         * focus callbacks -- so this port, which IS that activity, must too.
+         *
+         * They are not optional, and skipping them fails SILENTLY. Each writes
+         * one byte into the app driver (surface -> +326, running -> +325,
+         * focus -> +324, all zero from the driver's constructor).
+         * HandleApplicationDidBecomeActive -- the handler PumpMessageQueue
+         * dispatches for applicationDidBecomeActive -- opens with
+         *
+         *     if (surface == 0) return;
+         *     if (running == 0 && focus == 0) return;
+         *
+         * and only past that guard does it clear the driver's "skip the frame"
+         * byte at +316. onDrawFrame tests exactly that byte and, when set, takes
+         * a branch that updates and draws nothing. So without these three the
+         * engine boots perfectly, drains its queue, and then runs a fixed-cost
+         * empty frame forever: measured as `0 imports, 0 jni, 1052 ticks`,
+         * identical every frame, with a black window and no error anywhere.
+         * The giveaway in the log is a MISSING line -- "HandleApplicationWill-
+         * BecomeForeground" appears, "HandleApplicationDidBecomeActive" does
+         * not, because that debug print sits after the guard. */
+        std::uint32_t notify_surface_change;
+        std::uint32_t notify_app_running;
+        std::uint32_t notify_focus_change;
     } native;
 
     /* How many dummy words precede (width, height) in the onSurfaceChanged
@@ -129,6 +176,64 @@ struct GameSymbols {
         std::uint32_t purchase_receipt_verdict;
     } patch;
 
+    /* What diagnostics/guest_probe reads to explain a frame that draws nothing.
+     * All optional: zeroed out, dump_frame_gate reports what it can and skips
+     * the rest. These were 9.6.1 literals inside guest_probe.cpp, which put .so
+     * addresses outside this file -- the one thing symbols.cpp promises not to
+     * allow -- and which the probe then applied to whatever build was loaded:
+     * 4.5.2 has a non-zero app_driver global, so it ran and printed 9.6.1's
+     * field offsets against a 4.5.2 object. Plausible numbers, all meaningless. */
+    struct {
+        /* Byte flags in the AndroidAppDriver that gate whether a frame draws.
+         * Read off onDrawFrame's body and HandleApplicationDidBecomeActive. */
+        std::uint32_t gate_skip_frame;
+        std::uint32_t gate_focus;
+        std::uint32_t gate_running;
+        std::uint32_t gate_surface;
+
+        /* Where the driver sits inside the app object: SexyAppBase's constructor
+         * stores it there, so *(app + this) finds the driver even while the
+         * driver's own global is still unpublished -- which is exactly the state
+         * the probe exists to explain. */
+        std::uint32_t app_driver_field;
+
+        /* Sexy::AndroidAppDriver's vtable, the slot holding the thunk that
+         * publishes `this` into the driver global, and that thunk itself.
+         *
+         * The vtable base is derived by hand from the {offset_to_top, typeinfo}
+         * header, and a plausible-but-wrong base makes every slot index wrong
+         * while still looking right -- so the probe verifies it against the live
+         * object's vptr instead of trusting the arithmetic. That check is only
+         * possible because all three are given together. */
+        std::uint32_t driver_vtable;
+        std::uint32_t publish_slot;
+        std::uint32_t publish_thunk;
+
+        /* The Sexy::AndroidAsyncIOFileDriver global, and THE bisector for a boot
+         * that never publishes the app driver.
+         *
+         * SexyAppBase's constructor creates this object and stores it here, then
+         * -- a few instructions later, in the same constructor -- creates the
+         * AndroidAppDriver at app + app_driver_field. So the two together say
+         * exactly how far that constructor got, which is the one thing a black
+         * first frame does not otherwise reveal:
+         *
+         *   this 0, driver 0 -- the constructor died BEFORE either, i.e. inside
+         *                       the base-class chain above SexyAppBase;
+         *   this != 0, drv 0 -- it died between the two, a span of ~20 lines;
+         *   both != 0        -- the constructor finished, so the failure is
+         *                       downstream of it and nothing in the app-
+         *                       construction tree is to blame.
+         *
+         * Worth reading even when everything works: the framework's own
+         * "is there a resources.xml?" probe, which runs immediately after the
+         * constructor returns, dereferences this global with NO null check. A
+         * constructor that died leaves it 0 and that probe then walks a vtable
+         * of zeroes -- so a failure anywhere above reappears as the executed
+         * void, several frames from its cause. */
+        std::uint32_t file_driver;
+    } probe;
+
     /* Field offsets for the touch diagnostic -- see diagnostics/input_probe.
      * All optional: zeroed out, the probe simply reports nothing. */
     struct {
@@ -152,7 +257,31 @@ struct GameSymbols {
      * unrelated function. */
     std::uint64_t fingerprint_draw_frame;
     std::uint64_t fingerprint_game_app_init;
+
+    /* The object arguments Native_GameAppInitialize declares, in order, NOT
+     * counting the leading (JNIEnv*, jobject thiz): thiz is always
+     * AndroidGameApp and the caller supplies it.
+     *
+     * Per-version because the list genuinely changed. 1.6 and 4.5.2 declare
+     * eight and pass an AndroidFacebookDriver third; 9.6.1 declares seven and
+     * has no Facebook driver at all. Reusing the old list on 9.6.1 would shift
+     * cloud, GooglePlay* and notification each down one register -- and this is
+     * the exact mistake that once made the engine call
+     * Graphics_GetScreenSizeInPixels on the wrong fake object, corrupting the
+     * screen size instead of failing. Read it off the JNI signature string in
+     * the JNINativeMethod table, never guessed.
+     *
+     * Every version must fill this in. It used to be optional, with nullptr
+     * meaning "the historical eight" and engine/lifecycle.cpp holding that list
+     * as a fallback -- which put per-version data outside this file, against the
+     * rule at the top of symbols.cpp, and duplicated seven of the eight names. */
+    const char *const *game_app_init_args;
+    std::uint32_t game_app_init_arg_count;
 };
+
+/* thiz, the leading jobject every build's Native_GameAppInitialize takes and
+ * which therefore is not in the per-version lists above. */
+extern const char *const kGameAppClass;
 
 /* Identifies the loaded image against the built-in table.
  *

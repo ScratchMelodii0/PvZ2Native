@@ -135,6 +135,34 @@ void c_mktime(GuestCall &c) {
     c.set_result((std::uint32_t)std::mktime(&tmv));
 }
 
+/* time_t timegm(struct tm *tm) -- mktime's UTC counterpart.
+ *
+ * NOT mktime: mktime interprets the fields as LOCAL time, so routing timegm to
+ * it would shift every result by the host's UTC offset. Since the host has no
+ * portable timegm (MinGW spells it _mkgmtime, POSIX has timegm, and neither is
+ * guaranteed here), the conversion is done arithmetically from the civil date,
+ * which is exact and depends on no timezone state at all. */
+void c_timegm(GuestCall &c) {
+    std::tm tmv{};
+    read_tm(c, c.arg(0), tmv);
+
+    /* Days from 1970-01-01 to the given y/m/d, by Howard Hinnant's days_from_civil.
+     * Valid for the whole range of a 32-bit time_t and free of leap-year edge
+     * cases, which hand-rolled loops routinely get wrong around 1900/2000. */
+    int y = tmv.tm_year + 1900;
+    const unsigned m = (unsigned)tmv.tm_mon + 1;
+    const unsigned d = (unsigned)tmv.tm_mday;
+    y -= m <= 2;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);
+    const unsigned doy = (153u * (m + (m > 2 ? -3u : 9u)) + 2u) / 5u + d - 1u;
+    const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+    const std::int64_t days = (std::int64_t)era * 146097 + (std::int64_t)doe - 719468;
+
+    const std::int64_t secs = days * 86400 + tmv.tm_hour * 3600 + tmv.tm_min * 60 + tmv.tm_sec;
+    c.set_result((std::uint32_t)(std::int32_t)secs);
+}
+
 void c_difftime(GuestCall &c) {
     c.set_resultd((double)(std::int32_t)c.arg(0) - (double)(std::int32_t)c.arg(1));
 }
@@ -261,6 +289,7 @@ void register_libc_time(ImportTable &t) {
     t.add("gmtime", c_gmtime);
     t.add("gmtime_r", c_gmtime_r);
     t.add("mktime", c_mktime);
+    t.add("timegm", c_timegm);
     t.add("difftime", c_difftime);
     t.add("strftime", c_strftime);
     t.add("wcsftime", c_wcsftime);

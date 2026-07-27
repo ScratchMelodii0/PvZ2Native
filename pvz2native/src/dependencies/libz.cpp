@@ -10,8 +10,12 @@
  */
 
 #include <pvz2native/dependencies/dependency.h>
+#include <pvz2native/dependencies/vfs.h>
 
 #include <zlib.h>
+
+#include <mutex>
+#include <unordered_map>
 
 namespace pvz2native {
 namespace {
@@ -127,6 +131,69 @@ void z_version(GuestCall &c) {
     c.set_result(slot);
 }
 
+/* --------------------------------------------------- gzFile, new in 9.6.1
+ *
+ * The whole-file gzip helpers, a different API from the z_stream one above:
+ * they own a FILE and the gzip framing themselves. The guest gets an opaque
+ * token; the host keeps the real gzFile, exactly as the fd and FILE tokens
+ * elsewhere work.
+ *
+ * The path goes through vfs::translate like every other guest path, so a gzopen
+ * of a guest-visible file lands on the right host file instead of failing on a
+ * path the host has never heard of. */
+std::mutex g_gz_lock;
+std::unordered_map<std::uint32_t, gzFile> g_gz_files;
+std::uint32_t g_next_gz_token = 0x7A000000; /* 'z' -- distinct from the FILE/fd token ranges */
+
+void z_gzopen(GuestCall &c) {
+    const std::string gpath = c.cstr(c.arg(0), 1024);
+    const std::string mode = c.cstr(c.arg(1), 16);
+    const std::string hpath = vfs::translate(c.rt, gpath);
+    gzFile f = gzopen(hpath.c_str(), mode.empty() ? "rb" : mode.c_str());
+    if (f == nullptr) {
+        c.log("[libz] gzopen(\"%s\" [%s], \"%s\") failed", gpath.c_str(), hpath.c_str(),
+              mode.c_str());
+        c.set_result(0); /* NULL gzFile */
+        return;
+    }
+    std::lock_guard<std::mutex> lk(g_gz_lock);
+    const std::uint32_t token = g_next_gz_token++;
+    g_gz_files[token] = f;
+    c.set_result(token);
+}
+
+gzFile gz_for(std::uint32_t token) {
+    std::lock_guard<std::mutex> lk(g_gz_lock);
+    auto it = g_gz_files.find(token);
+    return it == g_gz_files.end() ? nullptr : it->second;
+}
+
+/* int gzread(gzFile, voidp buf, unsigned len) -- -1 on error, which is NOT the
+ * same as 0 (end of file): a caller looping until 0 would spin forever if an
+ * error were folded into 0. */
+void z_gzread(GuestCall &c) {
+    gzFile f = gz_for(c.arg(0));
+    const std::uint32_t buf = c.arg(1), len = c.arg(2);
+    if (f == nullptr || !c.in_bounds(buf, len)) {
+        c.set_result((std::uint32_t)-1);
+        return;
+    }
+    const int got = gzread(f, &c.img->mem[buf], len);
+    c.set_result((std::uint32_t)got);
+}
+
+void z_gzclose(GuestCall &c) {
+    std::lock_guard<std::mutex> lk(g_gz_lock);
+    auto it = g_gz_files.find(c.arg(0));
+    if (it == g_gz_files.end()) {
+        c.set_result((std::uint32_t)Z_STREAM_ERROR);
+        return;
+    }
+    const int rc = gzclose(it->second);
+    g_gz_files.erase(it);
+    c.set_result((std::uint32_t)rc);
+}
+
 }  // namespace
 
 void register_libz(ImportTable &t) {
@@ -150,6 +217,11 @@ void register_libz(ImportTable &t) {
     t.add("crc32", z_crc32);
     t.add("adler32", z_adler32);
     t.add("zlibVersion", z_version);
+
+    /* --- added for 9.6.1 --- */
+    t.add("gzopen", z_gzopen);
+    t.add("gzread", z_gzread);
+    t.add("gzclose", z_gzclose);
 }
 
 }  // namespace pvz2native

@@ -76,7 +76,8 @@ typedef struct pvz2_config {
      *          this and the display's refresh rate.
      *   0   -- no cap at all: vsync is switched off too and frames are presented
      *          as fast as the machine manages (tearing, one core saturated).
-     * Anything negative reads as 0. Default 120 -- see pvz2_config_load. */
+     * Anything negative reads as 0. Default 60 -- stated once, in kSettings in
+     * config.cpp, which is also what the generated config.ini is written from. */
     int fps_limit;
 
     /* What AndroidHttpProxy.GetNetworkStatus() reports to the engine:
@@ -98,9 +99,10 @@ typedef struct pvz2_config {
      * all -- actually do. Off makes every launch a clean first run. Default ON. */
     int persist_saves;
 
-    /* [paths] -- always concrete after load: a value left unset in the .ini is
-     * filled with <exe_dir>/lib/<default filename> (so/obb) or <exe_dir>/save
-     * (save_dir). */
+    /* [paths] -- keys `so`, `obb` and `save`. Always concrete after load: a value
+     * left unset in the .ini is filled with <exe_dir>/lib/<default filename>
+     * (so/obb) or <exe_dir>/save (save_dir), and a relative one is resolved
+     * against the executable's folder. */
     char so_path[512];
     char obb_path[512];
     char save_dir[512];

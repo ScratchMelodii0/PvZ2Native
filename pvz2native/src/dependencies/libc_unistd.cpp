@@ -74,8 +74,13 @@ void write_stat(GuestCall &c, std::uint32_t buf, std::uint32_t mode, std::uint64
  *
  * A fixed token just below kFdTokenBase: positive, so the guest's `fd < 0`
  * checks still work, and outside the range the allocator ever hands out, so it
- * cannot collide with a real file. */
-constexpr std::uint32_t kRandomFdToken = 0x00003FFF;
+ * cannot collide with a real file.
+ *
+ * Note this is a TOKEN, not a guest address, even though it looks like one. It
+ * sits numerically inside the trampoline range in runtime/guest_memmap.h and that
+ * is harmless: fd tokens are never dereferenced, they only index a host table.
+ * Do not "fix" the apparent overlap by moving it. */
+constexpr std::uint32_t kRandomFdToken = kFdTokenBase - 1;
 
 bool is_random_device(const std::string &path) {
     return path == "/dev/urandom" || path == "/dev/random";
@@ -321,6 +326,277 @@ void c_readlink(GuestCall &c) {
  * just written, and the host has already given that file a current timestamp. */
 void c_utime(GuestCall &c) { c.set_result(0); }
 
+/* int getentropy(void *buffer, size_t length) -- 0 on success, -1/EIO on
+ * failure, and length > 256 is EIO by specification. Backed by the same host
+ * entropy as /dev/urandom above, because the caller (libc++'s random_device,
+ * and any hashing seed) genuinely wants unpredictable bytes. */
+void c_getentropy(GuestCall &c) {
+    const std::uint32_t buf = c.arg(0), len = c.arg(1);
+    if (len > 256 || buf == 0 || !c.in_bounds(buf, len)) {
+        c.set_errno(5 /* EIO */);
+        c.set_result((std::uint32_t)-1);
+        return;
+    }
+    fill_random(c, buf, len);
+    c.set_result(0);
+}
+
+/* --- what 9.6.1 adds --------------------------------------------------------
+ *
+ * Permission and ownership bits have no meaning here: the guest tree is a
+ * directory on the host owned by whoever ran the emulator, and there is exactly
+ * one guest user (see getuid in libc_misc.cpp). Reporting success is not a
+ * shortcut -- it is what these calls do on a filesystem without POSIX
+ * ownership, which is where an Android app's external storage usually lives. */
+void c_fchmod(GuestCall &c) { c.set_result(0); }
+void c_fchmodat(GuestCall &c) { c.set_result(0); }
+void c_lchown(GuestCall &c) { c.set_result(0); }
+void c_utimensat(GuestCall &c) { c.set_result(0); }
+
+/* Hard links, symlinks and device nodes. EPERM is "the filesystem does not
+ * support this", which is true of the host paths this VFS maps onto and is a
+ * state callers already handle -- it is what they get on FAT/exFAT storage.
+ * Reporting success and creating nothing would leave the caller believing a
+ * path exists that does not. */
+void c_link(GuestCall &c) {
+    c.set_errno(1 /* EPERM */);
+    c.set_result((std::uint32_t)-1);
+}
+void c_symlink(GuestCall &c) {
+    c.set_errno(1 /* EPERM */);
+    c.set_result((std::uint32_t)-1);
+}
+void c_mknod(GuestCall &c) {
+    c.set_errno(1 /* EPERM */);
+    c.set_result((std::uint32_t)-1);
+}
+
+/* int truncate(const char *path, off_t length) -- ftruncate by path. */
+void c_truncate(GuestCall &c) {
+    const std::string hpath = vfs::translate(c.rt, c.cstr(c.arg(0), 1024));
+#if defined(_WIN32)
+    int fd = _open(hpath.c_str(), _O_RDWR | _O_BINARY);
+    if (fd < 0) {
+        c.set_errno(2 /* ENOENT */);
+        c.set_result((std::uint32_t)-1);
+        return;
+    }
+    int rc = _chsize(fd, (long)c.arg(1));
+    _close(fd);
+#else
+    int rc = truncate(hpath.c_str(), (off_t)c.arg(1));
+#endif
+    if (rc != 0) c.set_errno(2 /* ENOENT */);
+    c.set_result(rc == 0 ? 0u : (std::uint32_t)-1);
+}
+
+/* char *realpath(const char *path, char *resolved)
+ *
+ * The guest tree is virtual, so "canonical" means lexically canonical: there
+ * are no symlinks to follow (see c_readlink) and translating to a HOST path
+ * would hand the guest an absolute Windows path it would then fail to reopen.
+ * Collapses "." and ".." and duplicate separators, and keeps the answer in the
+ * guest's own namespace. */
+void c_realpath(GuestCall &c) {
+    const std::uint32_t out = c.arg(1);
+    const std::string in = c.cstr(c.arg(0), 1024);
+    if (in.empty()) {
+        c.set_errno(2 /* ENOENT */);
+        c.set_result(0);
+        return;
+    }
+
+    std::vector<std::string> parts;
+    const bool absolute = in[0] == '/';
+    std::size_t i = 0;
+    while (i < in.size()) {
+        std::size_t j = in.find('/', i);
+        if (j == std::string::npos) j = in.size();
+        const std::string seg = in.substr(i, j - i);
+        if (seg == "..") {
+            if (!parts.empty()) parts.pop_back();
+        } else if (!seg.empty() && seg != ".") {
+            parts.push_back(seg);
+        }
+        i = j + 1;
+    }
+    std::string canonical = absolute ? "/" : "";
+    for (std::size_t k = 0; k < parts.size(); ++k) {
+        if (k) canonical += '/';
+        canonical += parts[k];
+    }
+    if (canonical.empty()) canonical = ".";
+
+    /* A NULL `resolved` means "allocate it for me", and the caller frees it --
+     * so it must come from the same heap free() uses. */
+    std::uint32_t dst = out;
+    if (dst == 0) {
+        dst = c.dup_cstr(canonical);
+        c.set_result(dst);
+        return;
+    }
+    c.put_cstr(dst, canonical);
+    c.set_result(dst);
+}
+
+/* long pathconf(const char *path, int name) / fpathconf(int fd, int name).
+ * Only the two limits anyone actually queries are answered; -1 without setting
+ * errno is the specified way to say "no limit / not applicable". */
+void c_pathconf(GuestCall &c) {
+    switch (c.arg(1)) {
+        case 3:  c.set_result(255); return;  /* _PC_NAME_MAX */
+        case 4:  c.set_result(4096); return; /* _PC_PATH_MAX */
+        case 5:  c.set_result(4096); return; /* _PC_PIPE_BUF */
+        default: c.set_result((std::uint32_t)-1); return;
+    }
+}
+
+/* int pipe(int fds[2]) -- a REAL host pipe.
+ *
+ * Implemented rather than refused because a pipe is the classic self-pipe
+ * wakeup, and a thread that cannot create one may spin or block forever instead
+ * of taking an error path. Nothing about it needs a network or a second
+ * process, so there is no reason to refuse. */
+void c_pipe(GuestCall &c) {
+    const std::uint32_t out = c.arg(0);
+    int fds[2] = {-1, -1};
+#if defined(_WIN32)
+    int rc = _pipe(fds, 4096, _O_BINARY);
+#else
+    int rc = pipe(fds);
+#endif
+    if (rc != 0 || out == 0) {
+        c.set_errno(24 /* EMFILE */);
+        c.set_result((std::uint32_t)-1);
+        return;
+    }
+    std::lock_guard<std::mutex> lk(c.rt->files_lock);
+    for (int i = 0; i < 2; ++i) {
+        const std::uint32_t token = c.rt->next_fd_token++;
+        c.rt->host_fds[token] = fds[i];
+        c.write32(out + (std::uint32_t)i * 4, token);
+    }
+    c.set_result(0);
+}
+
+/* int dup2(int oldfd, int newfd)
+ *
+ * Guest descriptors are tokens into host_fds, not real numbers, so this cannot
+ * defer to the host's dup2 -- it duplicates the underlying host descriptor and
+ * rebinds the NEW TOKEN to it, which is the behaviour the guest can observe. */
+void c_dup2(GuestCall &c) {
+    const std::uint32_t oldtok = c.arg(0), newtok = c.arg(1);
+    if (oldtok == newtok) {
+        c.set_result(newtok);
+        return;
+    }
+    int oldfd = c.fd(oldtok);
+    if (oldfd < 0) {
+        c.set_errno(9 /* EBADF */);
+        c.set_result((std::uint32_t)-1);
+        return;
+    }
+#if defined(_WIN32)
+    int copy = _dup(oldfd);
+#else
+    int copy = dup(oldfd);
+#endif
+    if (copy < 0) {
+        c.set_errno(24 /* EMFILE */);
+        c.set_result((std::uint32_t)-1);
+        return;
+    }
+    std::lock_guard<std::mutex> lk(c.rt->files_lock);
+    auto existing = c.rt->host_fds.find(newtok);
+    if (existing != c.rt->host_fds.end()) {
+#if defined(_WIN32)
+        _close(existing->second);
+#else
+        close(existing->second);
+#endif
+    }
+    c.rt->host_fds[newtok] = copy;
+    c.set_result(newtok);
+}
+
+/* int fcntl(int fd, int cmd, ...)
+ *
+ * Only the flag queries the guest actually makes. F_GETFL must report a real
+ * access mode -- O_RDWR -- because a caller that reads 0 concludes the
+ * descriptor is read-only and may refuse to write to it. */
+void c_fcntl(GuestCall &c) {
+    const int fd = c.fd(c.arg(0));
+    if (fd < 0) {
+        c.set_errno(9 /* EBADF */);
+        c.set_result((std::uint32_t)-1);
+        return;
+    }
+    switch (c.arg(1)) {
+        case 1: c.set_result(0); return;  /* F_GETFD -> no FD_CLOEXEC       */
+        case 2: c.set_result(0); return;  /* F_SETFD -> accepted, ignored   */
+        case 3: c.set_result(2); return;  /* F_GETFL -> O_RDWR              */
+        case 4: c.set_result(0); return;  /* F_SETFL -> accepted, ignored   */
+        default:
+            c.set_errno(22 /* EINVAL */);
+            c.set_result((std::uint32_t)-1);
+            return;
+    }
+}
+
+/* ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count)
+ *
+ * A real copy through a host buffer. Both descriptors are ours, so this is
+ * ordinary file I/O -- the name is misleading, no socket is involved. Honours
+ * the *offset in/out contract: when non-NULL, reading starts there and the file
+ * position of in_fd is left alone. */
+void c_sendfile(GuestCall &c) {
+    const int out_fd = c.fd(c.arg(0));
+    const int in_fd = c.fd(c.arg(1));
+    const std::uint32_t offptr = c.arg(2);
+    std::uint32_t count = c.arg(3);
+    if (out_fd < 0 || in_fd < 0) {
+        c.set_errno(9 /* EBADF */);
+        c.set_result((std::uint32_t)-1);
+        return;
+    }
+
+    long start = -1;
+    if (offptr != 0) {
+        start = (long)c.read32(offptr);
+#if defined(_WIN32)
+        long saved = _lseek(in_fd, 0, SEEK_CUR);
+        _lseek(in_fd, start, SEEK_SET);
+#else
+        long saved = lseek(in_fd, 0, SEEK_CUR);
+        lseek(in_fd, start, SEEK_SET);
+#endif
+        (void)saved;
+    }
+
+    std::vector<char> buf(64 * 1024);
+    std::uint32_t moved = 0;
+    while (count > 0) {
+        const std::uint32_t want = count < buf.size() ? count : (std::uint32_t)buf.size();
+#if defined(_WIN32)
+        int got = _read(in_fd, buf.data(), want);
+#else
+        int got = (int)read(in_fd, buf.data(), want);
+#endif
+        if (got <= 0) break;
+#if defined(_WIN32)
+        int put = _write(out_fd, buf.data(), got);
+#else
+        int put = (int)write(out_fd, buf.data(), got);
+#endif
+        if (put <= 0) break;
+        moved += (std::uint32_t)put;
+        count -= (std::uint32_t)put;
+        if (put < got) break; /* short write: stop, as sendfile does */
+    }
+    if (offptr != 0) c.write32(offptr, (std::uint32_t)(start + (long)moved));
+    c.set_result(moved);
+}
+
 /* int statfs(const char *path, struct statfs *buf)
  *
  * Reports the real free space, because the one caller that matters is a
@@ -533,6 +809,24 @@ void register_libc_unistd(ImportTable &t) {
 
     t.add("ioctl", c_ioctl);
     t.add("poll", c_poll);
+
+    /* --- added for 9.6.1 --- */
+    t.add("getentropy", c_getentropy);
+    t.add("fchmod", c_fchmod);
+    t.add("fchmodat", c_fchmodat);
+    t.add("lchown", c_lchown);
+    t.add("utimensat", c_utimensat);
+    t.add("link", c_link);
+    t.add("symlink", c_symlink);
+    t.add("mknod", c_mknod);
+    t.add("truncate", c_truncate);
+    t.add("realpath", c_realpath);
+    t.add("pathconf", c_pathconf);
+    t.add("fpathconf", c_pathconf);
+    t.add("pipe", c_pipe);
+    t.add("dup2", c_dup2);
+    t.add("fcntl", c_fcntl);
+    t.add("sendfile", c_sendfile);
 }
 
 }  // namespace pvz2native

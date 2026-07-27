@@ -1,0 +1,3 @@
+"C:\Program Files\CMake\bin\cmake.exe" -E rm -f CMakeFiles\infcover.dir/objects.a
+C:\mingw64roblauncher\bin\ar.exe qc CMakeFiles\infcover.dir/objects.a @CMakeFiles\infcover.dir\objects1.rsp
+C:\mingw64roblauncher\bin\gcc.exe -O3 -DNDEBUG -coverage -Wl,--whole-archive CMakeFiles\infcover.dir/objects.a -Wl,--no-whole-archive -o infcover.exe -Wl,--out-implib,libinfcover.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\infcover.dir\linkLibs.rsp

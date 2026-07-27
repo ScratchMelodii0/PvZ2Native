@@ -7,6 +7,7 @@
 #include <utility>
 
 #include <pvz2native/dependencies/dependency.h>
+#include <pvz2native/runtime/guest_memmap.h>
 
 namespace pvz2native {
 
@@ -39,19 +40,21 @@ namespace dex {
  * JNIEnv* is really a `struct JNINativeInterface**`: a pointer to a pointer to
  * a table of function pointers. Both levels are built in the emulated address
  * space, with every slot wired to its own SVC trampoline, so a JNI call from
- * guest code traps straight back to us and we know exactly which slot it was. */
-constexpr std::uint32_t kJniTableAddr = 0x00006000;  /* the function-pointer table */
-constexpr std::uint32_t kJniStubsAddr = 0x00006800;  /* one "SVC #(kJniSvcBase+i)" per slot */
-constexpr std::uint32_t kJniEnvPtrAddr = 0x00007000; /* one word: *envPtr == kJniTableAddr */
-constexpr std::uint32_t kJniSvcBase = 10000;
+ * guest code traps straight back to us and we know exactly which slot it was.
+ *
+ * WHERE they sit is not decided here -- runtime/guest_memmap.h owns the whole
+ * sub-image layout and checks at build time that these do not collide with the
+ * trampoline table, the scratch area or each other. Only the SVC number bases,
+ * which are not addresses, belong to this layer. */
+using runtime::memmap::kJavaVmPtrAddr;
+using runtime::memmap::kJavaVmSlots;
+using runtime::memmap::kJavaVmStubsAddr;
+using runtime::memmap::kJavaVmTableAddr;
+using runtime::memmap::kJniEnvPtrAddr;
+using runtime::memmap::kJniStubsAddr;
+using runtime::memmap::kJniTableAddr;
 
-/* The JavaVM (JNIInvokeInterface_**) that GetJavaVM hands back. Eight slots:
- * reserved0-2, DestroyJavaVM, AttachCurrentThread, DetachCurrentThread, GetEnv,
- * AttachCurrentThreadAsDaemon. */
-constexpr std::uint32_t kJavaVmTableAddr = 0x00008000;
-constexpr std::uint32_t kJavaVmStubsAddr = 0x00008100;
-constexpr std::uint32_t kJavaVmPtrAddr = 0x00008200;
-constexpr std::uint32_t kJavaVmSlotCount = 8;
+constexpr std::uint32_t kJniSvcBase = 10000;
 constexpr std::uint32_t kJavaVmSvcBase = 20000;
 
 std::uint32_t jni_slot_count();
@@ -177,14 +180,10 @@ const HookTable &hook_table();
  * is pending. */
 void iap_deliver_pending(pvz2_elf_image_t *img, GuestRuntime *rt);
 
-/* --- host configuration -------------------------------------------------- *
- *
- * The surface size the engine is told about. Everything geometric derives from
- * it (Graphics_GetScreenSizeInPixels -> LawnApp::SetWidthHeight), so it must
- * match the real host window. Set once at startup by the harness. */
-void set_screen_size(std::uint32_t width, std::uint32_t height);
-std::uint32_t screen_width();
-std::uint32_t screen_height();
+/* The surface size the engine is told about -- everything geometric derives from
+ * it (Graphics_GetScreenSizeInPixels -> LawnApp::SetWidthHeight) -- lives in
+ * <pvz2native/surface.h>. This layer used to keep its own copy, defaulting to
+ * 1280x720 while the other two copies defaulted to 960x540. */
 
 }  // namespace dex
 }  // namespace pvz2native

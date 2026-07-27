@@ -1,0 +1,22 @@
+{
+	"InstallScripts" : 
+	[
+		"E:/Juegos/PvZ 2/PvZ2Native/build/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/glad/cmake/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/zlib/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/zlib/test/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/SDL/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/dynarmic/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/dynarmic/externals/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/dynarmic/externals/fmt/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/dynarmic/externals/mcl/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/dynarmic/externals/mcl/src/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/dynarmic/externals/robin-map/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/dynarmic/externals/xbyak/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/dynarmic/externals/zydis/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/dynarmic/externals/zydis/zycore/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/dynarmic/src/dynarmic/cmake_install.cmake",
+		"E:/Juegos/PvZ 2/PvZ2Native/build/pvz2native/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

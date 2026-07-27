@@ -442,6 +442,49 @@ void c_sched_yield(GuestCall &c) {
     c.set_result(0);
 }
 
+/* ------------------------------------------------------------- rwlocks
+ *
+ * New in 9.6.1. Backed by a real GuestRwLock rather than reusing GuestMutex,
+ * because a recursive READ lock is legal and would deadlock against a mutex --
+ * see the type's comment in guest_sync.h. */
+void c_rwlock_init(GuestCall &c) {
+    c.rt->get_or_create_rwlock(c.arg(0));
+    c.set_result(0);
+}
+
+void c_rwlock_destroy(GuestCall &c) {
+    /* The object stays in the map. Destroying it would race any thread still
+     * inside a wait on it, and the map is small and bounded by the number of
+     * distinct guest addresses. */
+    c.set_result(0);
+}
+
+void c_rwlock_rdlock(GuestCall &c) {
+    c.note_blocked(); /* progress, not a spin -- keeps a worker off the runaway cap */
+    c.rt->get_or_create_rwlock(c.arg(0))->rdlock();
+    c.set_result(0);
+}
+
+void c_rwlock_wrlock(GuestCall &c) {
+    c.note_blocked();
+    c.rt->get_or_create_rwlock(c.arg(0))->wrlock(guest_tls::self_id);
+    c.set_result(0);
+}
+
+void c_rwlock_unlock(GuestCall &c) {
+    c.rt->get_or_create_rwlock(c.arg(0))->unlock();
+    c.set_result(0);
+}
+
+/* int pthread_atfork(void (*prepare)(), void (*parent)(), void (*child)())
+ *
+ * Records nothing and succeeds. This port's fork() always fails (see
+ * libc_socket.cpp's reasoning -- the callers are Crashlytics and analytics), so
+ * a handler registered here could never run. Returning 0 is what the caller
+ * needs to continue; failing would abort a library's initialiser over a
+ * hypothetical. */
+void c_atfork(GuestCall &c) { c.set_result(0); }
+
 }  // namespace
 
 void register_libc_pthread(ImportTable &t) {
@@ -478,6 +521,14 @@ void register_libc_pthread(ImportTable &t) {
     t.add("pthread_key_delete", c_key_delete);
     t.add("pthread_setspecific", c_setspecific);
     t.add("pthread_getspecific", c_getspecific);
+
+    /* Added for 9.6.1. */
+    t.add("pthread_rwlock_init", c_rwlock_init);
+    t.add("pthread_rwlock_destroy", c_rwlock_destroy);
+    t.add("pthread_rwlock_rdlock", c_rwlock_rdlock);
+    t.add("pthread_rwlock_wrlock", c_rwlock_wrlock);
+    t.add("pthread_rwlock_unlock", c_rwlock_unlock);
+    t.add("pthread_atfork", c_atfork);
 
     /* Attributes: accepted and ignored -- see c_ok. */
     t.add("pthread_attr_init", c_ok);

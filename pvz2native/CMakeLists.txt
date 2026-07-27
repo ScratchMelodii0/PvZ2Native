@@ -4,7 +4,11 @@ project(pvz2native-core)
 
 file(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS src/*.c src/*.cpp)
 
-add_executable(pvz2native ${SOURCE_FILES} ../stb/stb_vorbis.c)
+# stb_vorbis is gone with src/audio/sound_repository.c, its only consumer. That
+# file, src/audio/sles.c and src/audio/audio_engine.c were an older OpenSL
+# implementation with no callers left: the live audio path is the guest-vtable
+# bridge in src/dependencies/libopensles.cpp plus src/audio/audio_output.cpp.
+add_executable(pvz2native ${SOURCE_FILES})
 target_include_directories(pvz2native PUBLIC include/)
 target_link_libraries(pvz2native ${CMAKE_DL_LIBS} zlibstatic SDL2::SDL2 SDL2main glad dynarmic)
 include_directories(pvz2native PUBLIC include/)

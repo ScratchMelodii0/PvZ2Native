@@ -4,10 +4,14 @@
 
 #include <pvz2native/engine/engine.h>
 
+#include <cstdio>
+#include <cstring>
 #include <vector>
 
+#include <pvz2native/diagnostics/diagnostics.h>
 #include <pvz2native/game/symbols.h>
 #include <pvz2native/runtime/dynarmic_config.h>
+#include <pvz2native/surface.h>
 
 namespace pvz2native {
 namespace engine {
@@ -29,34 +33,68 @@ namespace rt_ = pvz2native::runtime;
  * tag_object_class(), so GetObjectClass/GetMethodID/CallXxxMethod on these
  * objects resolve to real (class, method) pairs instead of opaque handles. */
 void run_game_app_initialize(pvz2_elf_image_t *img, GuestRuntime *rt) {
-    constexpr std::uint32_t kFakeObjBase = 0x0000A000;
-    constexpr std::uint32_t kFakeObjStride = 0x40;
+    /* Which objects this build declares is per-version data, so it lives in the
+     * version table with every other per-version fact -- see GameSymbols. This
+     * file used to keep the 1.6/4.5.2 list of eight as a local fallback, which
+     * both duplicated the 9.6.1 list it differs from by one entry and broke
+     * symbols.cpp's rule that adding a release touches nothing outside it. */
+    const char *const *arg_classes = sym().game_app_init_args;
+    const std::uint32_t arg_count = sym().game_app_init_arg_count;
 
-    static const char *kArgLabels[9] = {
-        "fake_gameApp",          "fake_surfaceView",       "fake_httpProxy",
-        "fake_facebookDriver",   "fake_cloud",             "fake_googlePlayConnect",
-        "fake_achievements",     "fake_leaderboard",       "fake_notification",
-    };
-    static const char *kArgClasses[9] = {
-        "com/popcap/SexyAppFramework/AndroidGameApp", /* thiz */
-        "com/popcap/SexyAppFramework/AndroidSurfaceView",
-        "com/popcap/SexyAppFramework/AndroidHttpProxy",
-        "com/popcap/SexyAppFramework/AndroidFacebookDriver",
-        "com/popcap/SexyAppFramework/cloud/Cloud",
-        "com/popcap/SexyAppFramework/GooglePlay/GooglePlayConnect",
-        "com/popcap/SexyAppFramework/GooglePlay/GooglePlayAchievements",
-        "com/popcap/SexyAppFramework/GooglePlay/GooglePlayLeaderboard",
-        "com/popcap/SexyAppFramework/AndroidNotification",
-    };
+    /* Refusing loudly, not silently. GameAppInitialize is the call that gives the
+     * engine its surface view and http proxy; running it with the wrong number of
+     * objects shifts every one down a register and corrupts the screen size
+     * instead of failing, which is precisely the bug this list exists to prevent.
+     * A version table entry without a list is a mistake in that entry. */
+    if (arg_classes == nullptr || arg_count == 0) {
+        std::printf("pvz2: [engine] %s has no game_app_init_args -- refusing to call "
+                    "Native_GameAppInitialize with a guessed signature\n",
+                    sym().version);
+        return;
+    }
+    if (arg_count + 1 > rt_::memmap::kFakeObjMax) {
+        std::printf("pvz2: [engine] %s declares %u objects, more than the %u the memory map "
+                    "reserves -- raise kFakeObjMax in runtime/guest_memmap.h\n",
+                    sym().version, arg_count, rt_::memmap::kFakeObjMax);
+        return;
+    }
 
+    /* thiz first, then the declared objects. Each gets its own scratch block and
+     * is tagged with the class it stands for, so GetObjectClass/GetMethodID on it
+     * resolve to a real (class, method) pair instead of an opaque handle. */
     std::vector<std::uint32_t> args;
-    for (int i = 0; i < 9; ++i) {
-        const std::uint32_t addr = kFakeObjBase + (std::uint32_t)i * kFakeObjStride;
-        rt_::make_fake_jstring(img, addr, kArgLabels[i]);
-        rt->tag_object_class(addr, kArgClasses[i]);
+    args.reserve(arg_count + 1);
+    for (std::uint32_t i = 0; i <= arg_count; ++i) {
+        const std::uint32_t addr = rt_::memmap::kFakeObjBase + i * rt_::memmap::kFakeObjStride;
+        const char *cls = (i == 0) ? kGameAppClass : arg_classes[i - 1];
+        /* The label is only for logging; the last path component reads well. */
+        const char *slash = std::strrchr(cls, '/');
+        rt_::make_fake_jstring(img, addr, slash ? slash + 1 : cls);
+        rt->tag_object_class(addr, cls);
         args.push_back(addr);
     }
     rt_::run_at_offset(img, rt, "Native_GameAppInitialize", sym().native.game_app_initialize, args);
+
+    /* It returns jboolean, and on a device AndroidGameApp.java refuses to start
+     * when that is false -- this port used to discard it and carry on.
+     *
+     * What false means, read off the body: it registers the natives, then caches
+     * ~50 jmethodIDs in one short-circuiting chain (Config_*, Device_*, UI_*,
+     * Resources_*, Info_Sys*, Play_*), and gives up at the FIRST link that comes
+     * back 0, leaving every later slot in that cache zeroed. Nothing announces
+     * it. The engine then calls through those zeroed IDs much later and from
+     * somewhere else entirely -- AndroidAsyncIOFileDriver::Init asks for
+     * Resources_GetUserDataFolder while SexyAppBase is still constructing -- so
+     * the symptom surfaces with no trace of this call in it.
+     *
+     * Not fatal here on purpose: which links matter differs per build, and
+     * refusing to boot on a build that merely lacks one would be worse than the
+     * silence it replaces. */
+    if (rt_::last_call_stats().result == 0) {
+        std::printf("pvz2: [engine] Native_GameAppInitialize returned FALSE -- it abandoned its "
+                    "jmethodID cache part-way, so some Java calls the engine makes later will go "
+                    "through a zeroed id. Booting anyway; expect a failure far from here\n");
+    }
 }
 
 /* Native_applicationWillFinishLaunching builds argv[] and runs the whole
@@ -72,12 +110,27 @@ void run_game_app_initialize(pvz2_elf_image_t *img, GuestRuntime *rt) {
  * global std::list, which is drained and dispatched at the top of every
  * onDrawFrame. */
 void run_application_launch(pvz2_elf_image_t *img, GuestRuntime *rt) {
+    diagnostics::dump_frame_gate(img, "before WillFinishLaunching");
     rt_::run_at_offset(img, rt, "Native_applicationWillFinishLaunching",
                        sym().native.application_will_finish_launching, {0, 0});
+    diagnostics::dump_frame_gate(img, "after WillFinishLaunching");
+
+    /* Native_createNativeApplicationLifecycleObserver -- new in 9.6.1, 0
+     * elsewhere. It runs HERE, after the framework constructor, and not right
+     * after GameAppInitialize where it was first tried: the AndroidAppDriver
+     * does not exist until WillFinishLaunching has built it, so anything that
+     * attaches or publishes that object has nothing to work with earlier. */
+    if (sym().native.create_lifecycle_observer != 0) {
+        rt_::run_at_offset(img, rt, "Native_createNativeApplicationLifecycleObserver",
+                           sym().native.create_lifecycle_observer, {0});
+        diagnostics::dump_frame_gate(img, "after LifecycleObserver");
+    }
+
     rt_::run_at_offset(img, rt, "Native_applicationDidFinishLaunching",
                        sym().native.application_did_finish_launching, {0});
     rt_::run_at_offset(img, rt, "Native_applicationWillBecomeForeground",
                        sym().native.application_will_become_foreground, {0});
+    diagnostics::dump_frame_gate(img, "after WillBecomeForeground");
 }
 
 /* onWindowFocusChanged(true) -> Native_applicationDidBecomeActive bookends the
@@ -102,11 +155,37 @@ void run_surface_changed(pvz2_elf_image_t *img, GuestRuntime *rt, std::uint32_t 
                        size_args, true);
 }
 
+/* The three `(Z)V` state natives 9.6.1 added -- see GameSymbols::native for what
+ * goes silently wrong without them. Static natives, so run_at_offset's implicit
+ * JNIEnv* lands in r0, the jclass placeholder in r1, and the jboolean in r2:
+ * that is the shape the bodies confirm, each doing `MOV R1, R2` before tailing
+ * into its one-line setter.
+ *
+ * They must precede applicationDidBecomeActive, because it is the handler for
+ * THAT message which reads all three and decides whether to start drawing. */
+void notify_app_state(pvz2_elf_image_t *img, GuestRuntime *rt) {
+    struct { std::uint32_t offset; const char *name; } kNotifies[] = {
+        {sym().native.notify_surface_change, "Native_NotifySurfaceChange"},
+        {sym().native.notify_app_running,    "Native_NotifyAppRunning"},
+        {sym().native.notify_focus_change,   "Native_NotifyFocusChange"},
+    };
+    for (const auto &n : kNotifies) {
+        if (n.offset == 0) continue; /* 1.6 and 4.5.2 have no such native */
+        rt_::run_at_offset(img, rt, n.name, n.offset, {0 /* jclass */, 1 /* JNI_TRUE */});
+    }
+}
+
 void run_surface_lifecycle(pvz2_elf_image_t *img, GuestRuntime *rt) {
     rt_::run_at_offset(img, rt, "Native_onSurfaceCreated", sym().native.on_surface_created, {});
-    run_surface_changed(img, rt, rt_::window_width(), rt_::window_height());
+    run_surface_changed(img, rt, pvz2_surface_width(), pvz2_surface_height());
+    /* Surface is live, the app is running and the window has focus -- assert all
+     * three BEFORE the message that consults them is enqueued. */
+    diagnostics::dump_frame_gate(img, "before Notify*");
+    notify_app_state(img, rt);
+    diagnostics::dump_frame_gate(img, "after Notify*");
     rt_::run_at_offset(img, rt, "Native_applicationDidBecomeActive",
                        sym().native.application_did_become_active, {0});
+    diagnostics::dump_frame_gate(img, "after DidBecomeActive");
 }
 
 }  // namespace engine

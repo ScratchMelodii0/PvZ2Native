@@ -98,6 +98,69 @@ struct GuestMutex {
     }
 };
 
+/* pthread_rwlock_t. New in 9.6.1, whose libc++_shared.so and engine both use
+ * them.
+ *
+ * Deliberately NOT aliased onto GuestMutex, tempting as that is. Taking a read
+ * lock twice on one thread is legal and ordinary -- a reader calls into another
+ * reader -- and against a plain mutex the second one waits for a release only
+ * the waiting thread could perform. That is a hang with nothing anywhere to
+ * point at, which is the failure mode this project keeps paying for. So readers
+ * are counted, and a recursive read is just another reader.
+ *
+ * Writers are exclusive and given no priority over readers: a writer-preferring
+ * lock can starve readers, and nothing here needs the guarantee. */
+struct GuestRwLock {
+    std::mutex m;
+    std::condition_variable cv;
+    uint32_t readers = 0;
+    bool writer = false;
+    uint32_t writer_owner = 0; /* guest thread id, for the self-deadlock check */
+
+    void rdlock() {
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait(lk, [&] { return !writer; });
+        ++readers;
+    }
+
+    bool try_rdlock() {
+        std::lock_guard<std::mutex> lk(m);
+        if (writer) return false;
+        ++readers;
+        return true;
+    }
+
+    void wrlock(uint32_t self = 0) {
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait(lk, [&] { return !writer && readers == 0; });
+        writer = true;
+        writer_owner = self;
+    }
+
+    bool try_wrlock(uint32_t self = 0) {
+        std::lock_guard<std::mutex> lk(m);
+        if (writer || readers != 0) return false;
+        writer = true;
+        writer_owner = self;
+        return true;
+    }
+
+    /* One entry point for both, because pthread_rwlock_unlock is one function
+     * and the caller does not say which kind it holds. */
+    void unlock() {
+        std::lock_guard<std::mutex> lk(m);
+        if (writer) {
+            writer = false;
+            writer_owner = 0;
+        } else if (readers > 0) {
+            --readers;
+        }
+        /* notify_all, not notify_one: releasing a writer may free several
+         * readers at once, and waking only one would leave the rest parked. */
+        cv.notify_all();
+    }
+};
+
 struct GuestCond {
     std::mutex m;
     std::condition_variable cv;

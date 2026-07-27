@@ -14,7 +14,7 @@
  * arguments missing.
  */
 
-#include "libc_internal.h"
+#include <pvz2native/dependencies/libc_internal.h>
 
 #include <pvz2native/dependencies/vfs.h>
 
@@ -510,6 +510,26 @@ void c_puts(GuestCall &c) {
     c.set_result(1);
 }
 
+/* int putchar(int c) -- fputc to stdout, which this port routes to the log like
+ * puts does. Buffered by line so a character-at-a-time writer does not produce
+ * one log line per character, which is what made the guest's own diagnostics
+ * unreadable. */
+void c_putchar(GuestCall &c) {
+    static std::string line;
+    const int ch = (int)(c.arg(0) & 0xFF);
+    if (ch == '\n') {
+        c.log("[guest stdout] %s", line.c_str());
+        line.clear();
+    } else {
+        line.push_back((char)ch);
+        if (line.size() >= 512) { /* never let a writer with no newline grow without bound */
+            c.log("[guest stdout] %s", line.c_str());
+            line.clear();
+        }
+    }
+    c.set_result((std::uint32_t)ch);
+}
+
 void c_fgets(GuestCall &c) {
     std::uint32_t dst = c.arg(0), size = c.arg(1);
     std::FILE *f = c.file(c.arg(2));
@@ -732,6 +752,7 @@ void register_libc_stdio(ImportTable &t) {
     t.add("putc", c_fputc);
     t.add("fputs", c_fputs);
     t.add("puts", c_puts);
+    t.add("putchar", c_putchar);
     t.add("fgets", c_fgets);
     t.add("ungetc", c_ungetc);
 

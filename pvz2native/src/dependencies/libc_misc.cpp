@@ -18,24 +18,31 @@ void c_errno(GuestCall &c) {
     c.set_result(c.errno_addr());
 }
 
+/* Only the handful of codes this port can actually produce are named. Shared by
+ * strerror and strerror_r so the two can never disagree. */
+const char *errno_text(std::uint32_t err) {
+    switch (err) {
+        case 2:   return "No such file or directory";
+        case 3:   return "No such process";
+        case 9:   return "Bad file descriptor";
+        case 10:  return "No child processes";
+        case 11:  return "Try again";
+        case 12:  return "Out of memory";
+        case 13:  return "Permission denied";
+        case 16:  return "Device or resource busy";
+        case 22:  return "Invalid argument";
+        case 34:  return "Numerical result out of range";
+        case 97:  return "Address family not supported by protocol";
+        case 110: return "Connection timed out";
+        default:  return "Unknown error";
+    }
+}
+
 void c_strerror(GuestCall &c) {
-    /* Returns a pointer to a static string, which must live in GUEST memory.
-     * Only the handful of codes this port can actually produce are named. */
+    /* Returns a pointer to a static string, which must live in GUEST memory. */
     static std::uint32_t slot = 0;
     if (slot == 0) slot = c.rt->heap.alloc(64);
-    const char *msg = "Unknown error";
-    switch (c.arg(0)) {
-        case 2:   msg = "No such file or directory"; break;
-        case 9:   msg = "Bad file descriptor"; break;
-        case 11:  msg = "Try again"; break;
-        case 12:  msg = "Out of memory"; break;
-        case 13:  msg = "Permission denied"; break;
-        case 16:  msg = "Device or resource busy"; break;
-        case 22:  msg = "Invalid argument"; break;
-        case 110: msg = "Connection timed out"; break;
-        default: break;
-    }
-    c.put_cstr(slot, msg);
+    c.put_cstr(slot, errno_text(c.arg(0)));
     c.set_result(slot);
 }
 
@@ -115,8 +122,54 @@ void c_syscall(GuestCall &c) {
 void c_prctl(GuestCall &c) { c.set_result(0); }
 void c_ptrace(GuestCall &c) { c.set_result((std::uint32_t)-1); }
 
+/* Names an address as <module>+0x<offset>, or "?" when it is in no module.
+ * Guest code addresses in a log are useless without this: with dependencies
+ * mapped, an address that looks like libPVZ2's is often libc++'s or Nimble's --
+ * mistaking one for the other has already cost this project a long hunt. */
+std::string where(const GuestCall &c, std::uint32_t addr) {
+    const pvz2_elf_module_t *m = pvz2_elf_module_for_pc(c.img, addr & ~1u);
+    char buf[128];
+    if (m == nullptr) {
+        std::snprintf(buf, sizeof(buf), "0x%08x (in no mapped module)", addr);
+    } else {
+        std::snprintf(buf, sizeof(buf), "0x%08x (%s+0x%x)", addr, m->name, (addr & ~1u) - m->base);
+    }
+    return buf;
+}
+
+/* raise(sig) -- and the one thing worth spending lines on is WHERE.
+ *
+ * SIGFPE(8) in particular is almost never a real signal: on ARM an integer
+ * divide by zero calls __aeabi_idiv0, and bionic's implementation of that is a
+ * raise(SIGFPE). So "guest called raise(8)" means "the engine divided by zero",
+ * and the only useful question is which division -- which the bare message did
+ * not answer, leaving a halt 128 words deep with nothing to grep for.
+ *
+ * lr is the immediate caller (usually __aeabi_idiv0 itself), so the stack is
+ * scanned for the return addresses above it. It is a heuristic backtrace -- any
+ * stale word that happens to point into a module shows up too -- but a wrong
+ * ENTRY is obvious in a disassembler, whereas no entries at all leaves nowhere
+ * to start. */
 void c_raise(GuestCall &c) {
-    c.log("guest called raise(%u)", c.arg(0));
+    const std::uint32_t sig = c.arg(0);
+    c.log("guest called raise(%u)%s from lr=%s", sig,
+          sig == 8 ? " [SIGFPE -- on ARM this is __aeabi_idiv0, i.e. an integer divide by zero]"
+                   : "",
+          where(c, c.lr()).c_str());
+
+    unsigned shown = 0;
+    for (std::uint32_t sp = c.sp(); shown < 12 && sp < c.sp() + 512; sp += 4) {
+        const std::uint32_t w = c.read32(sp);
+        const pvz2_elf_module_t *m = pvz2_elf_module_for_pc(c.img, w & ~1u);
+        /* Return addresses only: a data word can point into a module too, but
+         * an executable one is what a BL leaves behind. */
+        if (m == nullptr || (w & ~1u) < m->base + m->text_vaddr ||
+            (w & ~1u) >= m->base + m->text_vaddr + m->text_size) {
+            continue;
+        }
+        c.log("  [raise] stack +0x%-3x -> %s", sp - c.sp(), where(c, w).c_str());
+        ++shown;
+    }
     c.halt("raise");
 }
 
@@ -198,6 +251,223 @@ void c_assert2(GuestCall &c) {
  * are gone. */
 void c_aeabi_atexit(GuestCall &c) { c.set_result(0); }
 
+/* --- what 9.6.1 adds -------------------------------------------------------- */
+
+/* int strerror_r(int errnum, char *buf, size_t buflen)
+ *
+ * The XSI form, which is what bionic provides: writes into the caller's buffer
+ * and returns 0, or ERANGE if it did not fit. NOT the GNU form that returns a
+ * char* -- getting that backwards would have the caller print a pointer. */
+void c_strerror_r(GuestCall &c) {
+    const std::uint32_t buf = c.arg(1), buflen = c.arg(2);
+    const std::string msg = errno_text(c.arg(0));
+    if (buf == 0 || buflen == 0) {
+        c.set_result(22 /* EINVAL */);
+        return;
+    }
+    if (msg.size() + 1 > buflen) {
+        c.set_result(34 /* ERANGE */);
+        return;
+    }
+    c.put_cstr(buf, msg);
+    c.set_result(0);
+}
+
+/* Identity. One user, one group, and not root -- claiming uid 0 would send any
+ * caller that checks down a privileged path this port cannot honour. The values
+ * match a typical Android app uid. */
+void c_getuid(GuestCall &c) { c.set_result(10001); }
+void c_getgid(GuestCall &c) { c.set_result(10001); }
+
+/* getpwuid/getpwnam return a `struct passwd *` in GUEST memory, so the struct
+ * and every string it points at are built in one heap block. bionic's layout is
+ * {name, passwd, uid, gid, gecos, dir, shell} -- seven words on ARM32.
+ *
+ * Answering NULL instead is the tempting shortcut and the wrong one: a caller
+ * that asked "who am I?" and got NULL usually treats it as a fatal
+ * misconfiguration rather than as "no such user". */
+constexpr std::uint32_t kPasswdSize = 7 * 4;
+
+void build_passwd(GuestCall &c, std::uint32_t *out) {
+    static std::uint32_t block = 0;
+    if (block == 0) {
+        block = c.rt->heap.alloc(kPasswdSize + 96);
+        if (block == 0) {
+            *out = 0;
+            return;
+        }
+        const std::uint32_t strings = block + kPasswdSize;
+        const std::uint32_t name = strings;
+        const std::uint32_t empty = strings + 16;
+        const std::uint32_t dir = strings + 32;
+        const std::uint32_t shell = strings + 64;
+        c.put_cstr(name, "app");
+        c.put_cstr(empty, "");
+        c.put_cstr(dir, "/data/data/com.ea.game.pvz2_rfl");
+        c.put_cstr(shell, "/system/bin/sh");
+        c.write32(block + 0, name);
+        c.write32(block + 4, empty);  /* pw_passwd */
+        c.write32(block + 8, 10001);  /* pw_uid    */
+        c.write32(block + 12, 10001); /* pw_gid    */
+        c.write32(block + 16, empty); /* pw_gecos  */
+        c.write32(block + 20, dir);
+        c.write32(block + 24, shell);
+    }
+    *out = block;
+}
+
+void c_getpwuid(GuestCall &c) {
+    std::uint32_t pw = 0;
+    build_passwd(c, &pw);
+    c.set_result(pw);
+}
+
+/* int getpwuid_r(uid_t, struct passwd *pwd, char *buf, size_t buflen,
+ *                struct passwd **result)
+ * Copies into the caller's struct and sets *result to it; 0 on success. */
+void c_getpwuid_r(GuestCall &c) {
+    const std::uint32_t pwd = c.arg(1), result = c.arg(4);
+    std::uint32_t src = 0;
+    build_passwd(c, &src);
+    if (src == 0 || pwd == 0) {
+        if (result != 0) c.write32(result, 0);
+        c.set_result(22 /* EINVAL */);
+        return;
+    }
+    for (std::uint32_t i = 0; i < kPasswdSize; i += 4) {
+        c.write32(pwd + i, c.read32(src + i));
+    }
+    if (result != 0) c.write32(result, pwd);
+    c.set_result(0);
+}
+
+/* Groups. `struct group` is {name, passwd, gid, members} -- four words, with
+ * members a NULL-terminated char* array. */
+void c_getgrgid(GuestCall &c) {
+    static std::uint32_t block = 0;
+    if (block == 0) {
+        block = c.rt->heap.alloc(4 * 4 + 32);
+        if (block != 0) {
+            const std::uint32_t name = block + 16;
+            const std::uint32_t empty = block + 24;
+            const std::uint32_t members = block + 28; /* one NULL entry */
+            c.put_cstr(name, "app");
+            c.put_cstr(empty, "");
+            c.write32(members, 0);
+            c.write32(block + 0, name);
+            c.write32(block + 4, empty);
+            c.write32(block + 8, 10001);
+            c.write32(block + 12, members);
+        }
+    }
+    c.set_result(block);
+}
+
+/* --- <sys/mman.h> ------------------------------------------------------------
+ *
+ * mmap is refused rather than emulated. A real one would have to carve an
+ * unused range out of the flat guest address space and keep it out of the
+ * heap's reach; nothing here needs that, and the callers (libc++'s allocator
+ * fallback, Crashlytics) all treat MAP_FAILED as "use malloc instead", which is
+ * a path they take on any memory-constrained device.
+ *
+ * MAP_FAILED is (void*)-1, NOT NULL -- a caller comparing against 0 would
+ * happily use the failed mapping. */
+void c_mmap(GuestCall &c) {
+    static bool warned = false;
+    if (!warned) {
+        warned = true;
+        c.log("[libc] mmap() -- refused (MAP_FAILED/ENOMEM); callers fall back to malloc");
+    }
+    c.set_errno(12 /* ENOMEM */);
+    c.set_result((std::uint32_t)-1);
+}
+
+/* munmap of something mmap never handed out. Succeeding is right: the caller is
+ * unwinding, and an error there is noise it cannot act on. */
+void c_munmap(GuestCall &c) { c.set_result(0); }
+
+/* The whole guest address space is one flat read/write allocation, so there are
+ * no protections to change and nothing to pin. Both succeed. */
+void c_mprotect(GuestCall &c) { c.set_result(0); }
+void c_mlock(GuestCall &c) { c.set_result(0); }
+
+/* --- <libgen.h> --------------------------------------------------------------
+ *
+ * Both may modify the input buffer and return a pointer into it, which is
+ * exactly what the POSIX versions do -- so the result stays valid guest memory
+ * with no allocation. */
+void c_basename(GuestCall &c) {
+    const std::uint32_t path = c.arg(0);
+    static std::uint32_t dot = 0;
+    if (dot == 0) {
+        dot = c.rt->heap.alloc(8);
+        if (dot != 0) c.put_cstr(dot, ".");
+    }
+    if (path == 0 || c.read8(path) == 0) {
+        c.set_result(dot);
+        return;
+    }
+    std::uint32_t len = 0;
+    while (c.read8(path + len) != 0) ++len;
+    /* Trailing slashes are not part of the name. */
+    while (len > 1 && c.read8(path + len - 1) == '/') --len;
+    if (len == 1 && c.read8(path) == '/') {
+        c.set_result(path); /* "/" is its own basename */
+        return;
+    }
+    c.write8(path + len, 0);
+    std::uint32_t start = len;
+    while (start > 0 && c.read8(path + start - 1) != '/') --start;
+    c.set_result(path + start);
+}
+
+void c_dirname(GuestCall &c) {
+    const std::uint32_t path = c.arg(0);
+    static std::uint32_t dot = 0;
+    if (dot == 0) {
+        dot = c.rt->heap.alloc(8);
+        if (dot != 0) c.put_cstr(dot, ".");
+    }
+    if (path == 0 || c.read8(path) == 0) {
+        c.set_result(dot);
+        return;
+    }
+    std::uint32_t len = 0;
+    while (c.read8(path + len) != 0) ++len;
+    while (len > 1 && c.read8(path + len - 1) == '/') --len;
+    std::uint32_t cut = len;
+    while (cut > 0 && c.read8(path + cut - 1) != '/') --cut;
+    if (cut == 0) {
+        c.set_result(dot); /* no slash at all -> "." */
+        return;
+    }
+    while (cut > 1 && c.read8(path + cut - 1) == '/') --cut;
+    c.write8(path + cut, 0);
+    c.set_result(path);
+}
+
+/* kill(pid, sig): the only reachable target is this process, and delivering a
+ * signal to it is not something the guest can survive meaningfully -- see
+ * c_sigaction on why handlers never run. ESRCH says "no such process", which is
+ * true of every pid but our own. */
+void c_kill(GuestCall &c) {
+    c.log("[libc] kill(pid=%u, sig=%u) ignored", c.arg(0), c.arg(1));
+    c.set_errno(3 /* ESRCH */);
+    c.set_result((std::uint32_t)-1);
+}
+
+/* sighandler_t bsd_signal(int sig, sighandler_t handler) -- bionic's signal().
+ * Accepted and ignored, returning SIG_DFL as the previous handler, for the same
+ * reason as sigaction: the guest can never receive one. */
+void c_bsd_signal(GuestCall &c) { c.set_result(0 /* SIG_DFL */); }
+
+/* execl(path, arg0, ...) -- varargs sibling of execv, which already refuses. */
+void c_execl(GuestCall &c) {
+    c.set_errno(2 /* ENOENT */);
+    c.set_result((std::uint32_t)-1);
+}
+
 }  // namespace
 
 void register_libc_misc(ImportTable &t) {
@@ -230,6 +500,32 @@ void register_libc_misc(ImportTable &t) {
 
     t.add("__assert2", c_assert2);
     t.add("__aeabi_atexit", c_aeabi_atexit);
+
+    /* --- added for 9.6.1 --- */
+    t.add("strerror_r", c_strerror_r);
+
+    t.add("getuid", c_getuid);
+    t.add("geteuid", c_getuid);
+    t.add("getgid", c_getgid);
+    t.add("getegid", c_getgid);
+    t.add("getpwuid", c_getpwuid);
+    t.add("getpwnam", c_getpwuid); /* one user, so the name is not consulted  */
+    t.add("getpwuid_r", c_getpwuid_r);
+    t.add("getgrgid", c_getgrgid);
+    t.add("getgrnam", c_getgrgid); /* likewise: one group                      */
+
+    t.add("mmap", c_mmap);
+    t.add("munmap", c_munmap);
+    t.add("mprotect", c_mprotect);
+    t.add("mlock", c_mlock);
+
+    t.add("basename", c_basename);
+    t.add("dirname", c_dirname);
+
+    t.add("kill", c_kill);
+    t.add("bsd_signal", c_bsd_signal);
+    t.add("signal", c_bsd_signal);
+    t.add("execl", c_execl);
 }
 
 }  // namespace pvz2native

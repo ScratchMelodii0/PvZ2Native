@@ -26,6 +26,7 @@
 #include <pvz2native/dependencies/dependency.h>
 
 #include <cstdio>
+#include <cstring>
 
 namespace pvz2native {
 namespace {
@@ -119,6 +120,122 @@ void s_gethostname(GuestCall &c) {
     c.set_result(0);
 }
 
+/* --- what 9.6.1 adds --------------------------------------------------------
+ *
+ * Two groups, treated differently on purpose: name RESOLUTION is refused,
+ * because it needs a network; address FORMATTING is implemented, because it is
+ * string manipulation that happens to be declared in a networking header. */
+
+constexpr std::uint32_t kEAI_FAIL = 4; /* non-recoverable name resolution failure */
+
+/* int getaddrinfo(node, service, hints, struct addrinfo **res)
+ *
+ * Non-zero is the error channel here -- getaddrinfo does NOT use errno -- and
+ * *res is left NULL so a caller that ignores the return value still cannot walk
+ * a bogus list. EAI_FAIL rather than EAI_AGAIN: "again" invites an immediate
+ * retry loop, and no amount of retrying will produce a resolver. */
+void s_getaddrinfo(GuestCall &c) {
+    note_no_network(c, "getaddrinfo()");
+    if (c.arg(3) != 0) c.write32(c.arg(3), 0);
+    c.set_result(kEAI_FAIL);
+}
+
+void s_getnameinfo(GuestCall &c) {
+    note_no_network(c, "getnameinfo()");
+    c.set_result(kEAI_FAIL);
+}
+
+/* freeaddrinfo(res): getaddrinfo never allocated a list, so there is nothing to
+ * release. Must still exist and must not fault -- it is called on the error
+ * path of code that did not check. */
+void s_freeaddrinfo(GuestCall &c) {}
+
+void s_gai_strerror(GuestCall &c) {
+    static std::uint32_t slot = 0;
+    if (slot == 0) slot = c.rt->heap.alloc(64);
+    c.put_cstr(slot, "Name resolution unavailable");
+    c.set_result(slot);
+}
+
+/* struct hostent *gethostbyname(const char *) -- NULL means "not found", which
+ * is the whole truth without a resolver. */
+void s_gethostbyname(GuestCall &c) {
+    note_no_network(c, "gethostbyname()");
+    c.set_result(0);
+}
+
+/* unsigned if_nametoindex(const char *) -- 0 means "no interface by that name",
+ * the specified way to report failure. */
+void s_if_nametoindex(GuestCall &c) { c.set_result(0); }
+
+/* socketpair(domain, type, protocol, int sv[2])
+ *
+ * Refused, unlike pipe() in libc_unistd.cpp which IS implemented. The
+ * difference is real: a pipe is unidirectional and a host pipe reproduces it
+ * exactly, while a socketpair is bidirectional and cannot be built from the
+ * host primitives available here. Half a socketpair would drop everything sent
+ * in one direction -- a data-loss bug that surfaces far from this file --
+ * whereas a refusal lands on the caller's existing no-socket path. */
+void s_socketpair(GuestCall &c) {
+    note_no_network(c, "socketpair()");
+    c.set_errno(kEAFNOSUPPORT);
+    c.set_result(kMinusOne);
+}
+
+/* int inet_pton(int af, const char *src, void *dst) -- presentation to binary.
+ * 1 on success, 0 for "not parseable in this family", -1 for a family we do not
+ * know. No network involved, so this is implemented rather than refused. */
+void s_inet_pton(GuestCall &c) {
+    constexpr std::uint32_t kAF_INET = 2;
+    const std::uint32_t af = c.arg(0), dst = c.arg(2);
+    if (af != kAF_INET) {
+        c.set_errno(kEAFNOSUPPORT);
+        c.set_result(kMinusOne);
+        return;
+    }
+    const std::string text = c.cstr(c.arg(1), 64);
+    unsigned parts[4];
+    char extra = 0;
+    if (std::sscanf(text.c_str(), "%u.%u.%u.%u%c", &parts[0], &parts[1], &parts[2], &parts[3],
+                    &extra) != 4) {
+        c.set_result(0);
+        return;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (parts[i] > 255) {
+            c.set_result(0);
+            return;
+        }
+    }
+    /* Network byte order: the first part is the FIRST byte in memory. */
+    if (dst != 0) {
+        for (int i = 0; i < 4; ++i) c.write8(dst + (std::uint32_t)i, (std::uint8_t)parts[i]);
+    }
+    c.set_result(1);
+}
+
+/* const char *inet_ntop(int af, const void *src, char *dst, socklen_t size)
+ * Returns dst on success, NULL with ENOSPC if it does not fit. */
+void s_inet_ntop(GuestCall &c) {
+    constexpr std::uint32_t kAF_INET = 2;
+    const std::uint32_t af = c.arg(0), src = c.arg(1), dst = c.arg(2), size = c.arg(3);
+    if (af != kAF_INET) {
+        c.set_errno(kEAFNOSUPPORT);
+        c.set_result(0);
+        return;
+    }
+    char text[16];
+    std::snprintf(text, sizeof(text), "%u.%u.%u.%u", c.read8(src), c.read8(src + 1),
+                  c.read8(src + 2), c.read8(src + 3));
+    if (dst == 0 || size < std::strlen(text) + 1) {
+        c.set_errno(28 /* ENOSPC */);
+        c.set_result(0);
+        return;
+    }
+    c.put_cstr(dst, text);
+    c.set_result(dst);
+}
+
 }  // namespace
 
 void register_libc_socket(ImportTable &t) {
@@ -139,6 +256,22 @@ void register_libc_socket(ImportTable &t) {
     t.add("select", s_select);
     t.add("inet_addr", s_inet_addr);
     t.add("gethostname", s_gethostname);
+
+    /* --- added for 9.6.1 --- */
+    t.add("getpeername", s_ebadf);
+    t.add("getsockopt", s_ebadf);
+    t.add("socketpair", s_socketpair);
+
+    t.add("getaddrinfo", s_getaddrinfo);
+    t.add("getnameinfo", s_getnameinfo);
+    t.add("freeaddrinfo", s_freeaddrinfo);
+    t.add("gai_strerror", s_gai_strerror);
+    t.add("gethostbyname", s_gethostbyname);
+    t.add("if_nametoindex", s_if_nametoindex);
+
+    /* Pure conversion, no network -- implemented, like inet_addr above. */
+    t.add("inet_pton", s_inet_pton);
+    t.add("inet_ntop", s_inet_ntop);
 }
 
 }  // namespace pvz2native

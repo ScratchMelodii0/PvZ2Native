@@ -90,6 +90,11 @@ typedef struct {
 #define PT_LOAD    1
 #define PT_DYNAMIC 2
 
+/* p_flags */
+#define PF_X 0x1
+#define PF_W 0x2
+#define PF_R 0x4
+
 /* d_tag */
 #define DT_NULL      0
 #define DT_NEEDED    1
@@ -102,6 +107,7 @@ typedef struct {
 #define DT_SYMENT    11
 #define DT_INIT      12
 #define DT_FINI      13
+#define DT_SONAME    14
 #define DT_REL       17
 #define DT_RELSZ     18
 #define DT_RELENT    19
