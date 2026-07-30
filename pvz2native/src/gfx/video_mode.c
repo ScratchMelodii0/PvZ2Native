@@ -8,14 +8,11 @@
 #include <pvz2native/gfx/video_mode.h>
 
 #include <pvz2native/config.h>
+#include <pvz2native/surface.h>
 
 #include <SDL.h>
 
 #include <string.h>
-
-/* 960x540 -- the historical fixed size, used when the display cannot be read. */
-#define PVZ2_FALLBACK_W 960
-#define PVZ2_FALLBACK_H 540
 
 /* Textures and the composite tend to assume even dimensions; round to the
  * nearest even so an odd aspect (e.g. 1366x768) never yields an odd width. */
@@ -37,11 +34,15 @@ void pvz2_choose_window_size(int *width, int *height, int *fullscreen) {
     }
 
     /* The primary display's mode drives both auto and native; without it there
-     * is nothing to derive an aspect from, so fall back to the fixed size. */
+     * is nothing to derive an aspect from, so fall back to the historical fixed
+     * size -- surface.h's own 960x540 default, read here rather than kept as a
+     * second literal (see surface.h for why that drifted before: this call runs
+     * before the first pvz2_surface_set, so the atomics are still at their
+     * compile-time default). */
     SDL_DisplayMode dm;
     if (SDL_GetCurrentDisplayMode(0, &dm) != 0 || dm.w <= 0 || dm.h <= 0) {
-        *width = PVZ2_FALLBACK_W;
-        *height = PVZ2_FALLBACK_H;
+        *width = (int)pvz2_surface_width();
+        *height = (int)pvz2_surface_height();
         return;
     }
 

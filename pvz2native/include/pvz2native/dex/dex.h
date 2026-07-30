@@ -125,6 +125,17 @@ struct DexCall {
 
 using MethodHook = void (*)(DexCall &);
 
+/* Generic bodies shared by the online-service classes this port does not
+ * implement (GooglePlay, Facebook, the purchase driver's ack methods): an
+ * unconditional "not connected", a fire-and-forget acknowledgement, and ""
+ * where Java would return null -- the engine feeds several of these straight
+ * into std::string(const char *), which aborts on a real null. Kept here,
+ * rather than copied per file, because the three were drifting identically in
+ * google_play.cpp, facebook.cpp, purchase_driver.cpp and android_http.cpp. */
+inline void hook_not_connected(DexCall &d) { d.ret_bool(false); }
+inline void hook_ignored(DexCall &d) { d.ret(0); }
+inline void hook_empty_string(DexCall &d) { d.ret_string(""); }
+
 /* (class, method) -> hook. Names are the real ones from classes.dex, e.g.
  * "com/popcap/SexyAppFramework/AndroidGameApp" / "Info_SysGetPackageName". */
 class HookTable {

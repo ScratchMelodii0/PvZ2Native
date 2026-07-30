@@ -48,6 +48,23 @@ typedef struct pvz2_config {
      * purchasable. Defaults ON -- see pvz2_config_load. */
     int emulate_iap;
 
+    /* Identity strings the engine asks Java for -- end up in save files, the
+     * fabricated purchase receipt and analytics payloads. package_name is the
+     * one with a correctness requirement: ResourceManager builds the RSB path
+     * the engine looks for from packageName + versionCode, so it must name
+     * whatever .obb [paths] obb actually points at, or boot fails with "RSB
+     * Initialization failed" (see the .obb-mismatch note in config.cpp).
+     * dex/hooks/purchase_driver.cpp reads the same field for the receipt JSON's
+     * packageName, so the two can never disagree again. */
+    char package_name[64];
+    char activity_name[96];
+    char device_name[64];
+    char hardware_model[64];
+    char os_version[16];
+    char currency_symbol[8];
+    char currency_code[8];
+    char product_version_string[32];
+
     /* [video] -- how the window and the guest surface are sized.
      *
      * mode picks the launch resolution when width/height are left at 0:

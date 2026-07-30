@@ -44,42 +44,33 @@ constexpr const char *kLeaderboard = "com/popcap/SexyAppFramework/GooglePlay/Goo
  * under a different class, move them; do not guess. */
 constexpr const char *kCloud = "java/lang/Object";
 
-/* Every "are we connected" query. False is both the truth and the state the
- * engine handles best. */
-void not_connected(DexCall &d) { d.ret_bool(false); }
-
-/* Fire-and-forget operations: accepted, nothing happens. */
-void ignored(DexCall &d) { d.ret(0); }
-
-/* The two Cloud getters that return a String. Java would answer null when
- * nothing is stored, and null is exactly what the engine cannot take: it feeds
- * these into std::string(const char *), which aborts the guest with
- * "basic_string::_S_construct null not valid". An empty string carries the same
- * meaning -- no saved cloud identity -- without the abort. */
-void empty_string(DexCall &d) { d.ret_string(""); }
+/* "Are we connected", "accept and do nothing", and the two Cloud getters that
+ * return a String (Java would answer null when nothing is stored, which
+ * aborts the guest) all use the shared stub bodies from dex.h --
+ * hook_not_connected, hook_ignored, hook_empty_string. */
 
 }  // namespace
 
 void register_google_play(HookTable &t) {
-    t.add(kConnect, "Play_IsConnected", not_connected);
-    t.add(kConnect, "Play_Connect", ignored);
-    t.add(kConnect, "Play_Connect_Silent", ignored);
-    t.add(kConnect, "Play_Disconnect", ignored);
+    t.add(kConnect, "Play_IsConnected", hook_not_connected);
+    t.add(kConnect, "Play_Connect", hook_ignored);
+    t.add(kConnect, "Play_Connect_Silent", hook_ignored);
+    t.add(kConnect, "Play_Disconnect", hook_ignored);
 
-    t.add(kAchievements, "Play_QueueAchievement_Percentage", ignored);
-    t.add(kAchievements, "Play_ResetAchievements", ignored);
-    t.add(kAchievements, "Play_ShowAchievementView", ignored);
+    t.add(kAchievements, "Play_QueueAchievement_Percentage", hook_ignored);
+    t.add(kAchievements, "Play_ResetAchievements", hook_ignored);
+    t.add(kAchievements, "Play_ShowAchievementView", hook_ignored);
 
-    t.add(kLeaderboard, "Play_SubmitScoreToLeaderboard", ignored);
-    t.add(kLeaderboard, "Play_ShowLeaderboardView", ignored);
-    t.add(kLeaderboard, "Play_ShowLeaderboardViewAll", ignored);
+    t.add(kLeaderboard, "Play_SubmitScoreToLeaderboard", hook_ignored);
+    t.add(kLeaderboard, "Play_ShowLeaderboardView", hook_ignored);
+    t.add(kLeaderboard, "Play_ShowLeaderboardViewAll", hook_ignored);
 
-    t.add(kCloud, "Cloud_Connect", ignored);
-    t.add(kCloud, "Cloud_attemptSilentSync", ignored);
-    t.add(kCloud, "Cloud_SetPcpId", ignored);
-    t.add(kCloud, "Cloud_SetAge", ignored);
-    t.add(kCloud, "Cloud_GetPcpId", empty_string);
-    t.add(kCloud, "Cloud_GetAge", empty_string);
+    t.add(kCloud, "Cloud_Connect", hook_ignored);
+    t.add(kCloud, "Cloud_attemptSilentSync", hook_ignored);
+    t.add(kCloud, "Cloud_SetPcpId", hook_ignored);
+    t.add(kCloud, "Cloud_SetAge", hook_ignored);
+    t.add(kCloud, "Cloud_GetPcpId", hook_empty_string);
+    t.add(kCloud, "Cloud_GetAge", hook_empty_string);
 }
 
 }  // namespace dex

@@ -28,10 +28,9 @@ namespace {
 
 constexpr const char *kFacebook = "com/popcap/SexyAppFramework/AndroidFacebookDriver";
 
-/* No session, so no token. Empty rather than null -- see the file comment. */
-void empty_string(DexCall &d) { d.ret_string(""); }
-
-void not_connected(DexCall &d) { d.ret_bool(false); }
+/* No session, so no token: empty rather than null (see the file comment) and
+ * "not connected" for every session-state query, both from dex.h's shared
+ * stubs -- hook_empty_string, hook_not_connected. */
 
 }  // namespace
 
@@ -39,22 +38,22 @@ void register_facebook(HookTable &t) {
     /* Every String getter, for the reason above. RefreshFriendsLists fills the
      * two list getters asynchronously on a device, so an empty answer is what
      * they legitimately return before it completes. */
-    t.add(kFacebook, "GetAccessToken", empty_string);
-    t.add(kFacebook, "GetFriendName", empty_string);
-    t.add(kFacebook, "GetFriendPictureURL", empty_string);
-    t.add(kFacebook, "getAppFriends", empty_string);
-    t.add(kFacebook, "getNonAppFriends", empty_string);
+    t.add(kFacebook, "GetAccessToken", hook_empty_string);
+    t.add(kFacebook, "GetFriendName", hook_empty_string);
+    t.add(kFacebook, "GetFriendPictureURL", hook_empty_string);
+    t.add(kFacebook, "getAppFriends", hook_empty_string);
+    t.add(kFacebook, "getNonAppFriends", hook_empty_string);
 
     /* The session-state queries. These were "IsLoggedIn" and "IsSessionValid"
      * until the names were checked against the decompiled driver: neither
      * exists, so both hooks were dead. The real ones are below -- and note
      * SessionIsValid, which is the transposition that hid the mistake. */
-    t.add(kFacebook, "IsSessionOpen", not_connected);
-    t.add(kFacebook, "IsSessionOpening", not_connected);
-    t.add(kFacebook, "SessionIsValid", not_connected);
-    t.add(kFacebook, "HasPermissions", not_connected);
-    t.add(kFacebook, "OpenSessionForRead", not_connected);
-    t.add(kFacebook, "AddPublishPermissions", not_connected);
+    t.add(kFacebook, "IsSessionOpen", hook_not_connected);
+    t.add(kFacebook, "IsSessionOpening", hook_not_connected);
+    t.add(kFacebook, "SessionIsValid", hook_not_connected);
+    t.add(kFacebook, "HasPermissions", hook_not_connected);
+    t.add(kFacebook, "OpenSessionForRead", hook_not_connected);
+    t.add(kFacebook, "AddPublishPermissions", hook_not_connected);
 }
 
 }  // namespace dex

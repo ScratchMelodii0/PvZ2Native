@@ -48,7 +48,6 @@ namespace {
 
 constexpr const char *kClass = "com/popcap/SexyAppFramework/GooglePlayPurchaseDriver";
 constexpr const char *kSkuClass = "com/popcap/SexyAppFramework/purchase/SkuDetails";
-constexpr const char *kPackage = "com.ea.game.pvz2_na";
 
 /* Google Play's purchaseState for a completed purchase. */
 constexpr int kPurchaseStatePurchased = 0;
@@ -98,8 +97,8 @@ std::string json_escape(const std::string &s) {
  * parses productId and purchaseToken out of this. */
 std::string purchase_json(const std::string &sku) {
     const std::string e = json_escape(sku);
-    return std::string("{\"orderId\":\"PVZ2NATIVE.") + e + "\",\"packageName\":\"" + kPackage +
-           "\",\"productId\":\"" + e + "\",\"purchaseTime\":0,\"purchaseState\":" +
+    return std::string("{\"orderId\":\"PVZ2NATIVE.") + e + "\",\"packageName\":\"" +
+           pvz2_config()->package_name + "\",\"productId\":\"" + e + "\",\"purchaseTime\":0,\"purchaseState\":" +
            std::to_string(kPurchaseStatePurchased) + ",\"purchaseToken\":\"pvz2native." + e +
            "\",\"developerPayload\":\"\"}";
 }
@@ -261,7 +260,8 @@ std::string sku_of(std::uint32_t obj) {
  * std::string, which aborts on null. */
 void sku_get_sku(DexCall &d) { d.ret_string(sku_of(d.thiz)); }
 void sku_get_type(DexCall &d) { d.ret_string("inapp"); }
-void sku_get_price(DexCall &d) { d.ret_string("$0.00"); }
+/* Free, but in the configured currency -- see [game] currency_symbol. */
+void sku_get_price(DexCall &d) { d.ret_string(std::string(pvz2_config()->currency_symbol) + "0.00"); }
 void sku_get_title(DexCall &d) { d.ret_string(sku_of(d.thiz)); }
 void sku_get_description(DexCall &d) { d.ret_string(""); }
 
@@ -334,8 +334,8 @@ void refresh(DexCall &d) {
     d.ret(0);
 }
 
-/* Fire-and-forget acknowledgements; nothing to do without a real store. */
-void ignored(DexCall &d) { d.ret(0); }
+/* Fire-and-forget acknowledgements; nothing to do without a real store --
+ * hook_ignored is the shared stub from dex.h. */
 void has_unconfirmed_payments(DexCall &d) { d.ret_bool(false); }
 void on_activity_result(DexCall &d) { d.ret_bool(false); }
 
@@ -377,9 +377,9 @@ void register_purchase_driver(HookTable &t) {
     t.add(kClass, "ProductTypeIsSupported", product_type_is_supported);
     t.add(kClass, "RequestPayment", request_payment);
     t.add(kClass, "Refresh", refresh);
-    t.add(kClass, "ConfirmDelivery", ignored);
+    t.add(kClass, "ConfirmDelivery", hook_ignored);
     t.add(kClass, "HasUnconfirmedPayments", has_unconfirmed_payments);
-    t.add(kClass, "Close", ignored);
+    t.add(kClass, "Close", hook_ignored);
     t.add(kClass, "onActivityResult", on_activity_result);
 
     /* The SkuDetails the engine reads out of the FireDidRefresh catalogue. */

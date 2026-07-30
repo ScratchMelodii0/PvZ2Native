@@ -503,16 +503,19 @@ void open_url(DexCall &d) {
  * These end up in save files, analytics payloads and the version display. */
 void product_version(DexCall &d) { d.ret_string("1"); }
 
-// hardcoded
-void product_version_string(DexCall &d) { d.ret_string(""); }
-void currency_symbol(DexCall &d) { d.ret_string("$"); }
+/* Everything below is a [game] key in config.ini rather than a literal here --
+ * see config.h's package_name/activity_name/device_name/hardware_model/
+ * os_version/currency_symbol/currency_code/product_version_string. package_name
+ * in particular is read by dex/hooks/purchase_driver.cpp too, so the two can
+ * never disagree the way this hook and that file's own copy used to. */
+void product_version_string(DexCall &d) { d.ret_string(pvz2_config()->product_version_string); }
+void currency_symbol(DexCall &d) { d.ret_string(pvz2_config()->currency_symbol); }
 /* Info_SysGetUserCurrencyCode -- the ISO 4217 code (e.g. "USD"). Unhooked it
  * returned null, and the in-app store treats a null currency as "store not
- * configured", which surfaces as the "Service Unavailable" purchase dialog. USD
- * is a safe default; the purchases are emulated and free either way. */
-void currency_code(DexCall &d) { d.ret_string("USD"); }
-void package_name(DexCall &d) { d.ret_string("com.ea.game.pvz2_na"); } /* matches the real .obb name */
-void activity_name(DexCall &d) { d.ret_string("com.popcap.PvZ2.PvZ2GameActivity"); }
+ * configured", which surfaces as the "Service Unavailable" purchase dialog. */
+void currency_code(DexCall &d) { d.ret_string(pvz2_config()->currency_code); }
+void package_name(DexCall &d) { d.ret_string(pvz2_config()->package_name); } /* matches the real .obb name */
+void activity_name(DexCall &d) { d.ret_string(pvz2_config()->activity_name); }
 /* Both come from [game] user_locale in config.ini (default "en_US"). The country
  * is the part after '_', upper-cased, so the two can never disagree -- a locale
  * of es_AR yields country AR without a second setting to keep in sync. */
@@ -524,7 +527,7 @@ void country_code(DexCall &d) {
     for (char &c : country) c = (char)std::toupper((unsigned char)c);
     d.ret_string(country.empty() ? "US" : country);
 }
-void device_name(DexCall &d) { d.ret_string("PvZ2Native"); }
+void device_name(DexCall &d) { d.ret_string(pvz2_config()->device_name); }
 void device_id(DexCall &d) { d.ret_string("UNKNOWN/EMULATOR"); } /* AndroidGameApp.java's own fallback */
 
 /* String Util_GetUUIDString()
@@ -535,8 +538,8 @@ void device_id(DexCall &d) { d.ret_string("UNKNOWN/EMULATOR"); } /* AndroidGameA
  * that changed every launch would make the game think it were a different
  * device each time. */
 void uuid_string(DexCall &d) { d.ret_string("6a8d1f2c-3b47-4e59-9c0a-pvz2native01"); }
-void os_version(DexCall &d) { d.ret_string("14"); }
-void hardware_model(DexCall &d) { d.ret_string("PvZ2Native PC"); }
+void os_version(DexCall &d) { d.ret_string(pvz2_config()->os_version); }
+void hardware_model(DexCall &d) { d.ret_string(pvz2_config()->hardware_model); }
 
 /* --- storage locations ---
  *

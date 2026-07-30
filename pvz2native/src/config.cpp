@@ -160,6 +160,34 @@ const Setting kSettings[] = {
      "Emulated in-app purchases: on = the store is available and every purchase\n"
      "the game requests completes for free; off = store reports not supported.",
      "1", nullptr},
+
+    {"game", "package_name", nullptr, Kind::kString, offsetof(pvz2_config_t, package_name),
+     sizeof(g_config.package_name),
+     "The Android package name the engine is told it runs as. Must match the\n"
+     "package baked into [paths] obb's filename (main.<versionCode>.<package>.obb)\n"
+     "or the RSB load fails and boot never leaves the loading screen.",
+     "com.ea.game.pvz2_na", nullptr},
+    {"game", "activity_name", nullptr, Kind::kString, offsetof(pvz2_config_t, activity_name),
+     sizeof(g_config.activity_name), "The Activity class name reported back to the engine.",
+     "com.popcap.PvZ2.PvZ2GameActivity", nullptr},
+    {"game", "device_name", nullptr, Kind::kString, offsetof(pvz2_config_t, device_name),
+     sizeof(g_config.device_name), "Device_GetDeviceName's answer.", "PvZ2Native", nullptr},
+    {"game", "hardware_model", nullptr, Kind::kString, offsetof(pvz2_config_t, hardware_model),
+     sizeof(g_config.hardware_model), "Diag_GetHardwareModel's answer.", "PvZ2Native PC", nullptr},
+    {"game", "os_version", nullptr, Kind::kString, offsetof(pvz2_config_t, os_version),
+     sizeof(g_config.os_version), "Diag_GetOSVersion's answer (an Android version string).", "14",
+     nullptr},
+    {"game", "currency_symbol", nullptr, Kind::kString, offsetof(pvz2_config_t, currency_symbol),
+     sizeof(g_config.currency_symbol), "Info_SysGetUserCurrencySymbol's answer.", "$", nullptr},
+    {"game", "currency_code", nullptr, Kind::kString, offsetof(pvz2_config_t, currency_code),
+     sizeof(g_config.currency_code),
+     "Info_SysGetUserCurrencyCode's answer, an ISO 4217 code. A null currency\n"
+     "reads to the in-app store as \"not configured\" (Service Unavailable), so\n"
+     "this must stay non-empty even if you change it.",
+     "USD", nullptr},
+    {"game", "product_version_string", nullptr, Kind::kString,
+     offsetof(pvz2_config_t, product_version_string), sizeof(g_config.product_version_string),
+     "Info_SysGetProductVersionString's answer. Leave commented for empty.", nullptr, ""},
     {"game", "persist_saves", nullptr, Kind::kBool, offsetof(pvz2_config_t, persist_saves), 0,
      "Persist the game's saved settings (age gate, options) to the save folder\n"
      "so they survive a restart. Off makes every launch a clean first run.",

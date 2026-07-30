@@ -9,8 +9,9 @@ namespace {
 
 /* 960x540 is the historical fixed size the port ran at before [video] existed,
  * and the only sensible answer if a reader somehow gets here before the host has
- * set anything. gfx/video_mode.c uses the same pair as its own fallback for the
- * same reason -- see PVZ2_FALLBACK_W there.
+ * set anything. gfx/video_mode.c's own launch-size fallback reads these same
+ * atomics (via pvz2_surface_width/height) rather than keeping a second literal,
+ * since it always runs before the first pvz2_surface_set.
  *
  * Atomic because the setter runs on the SDL thread (a window resize) while the
  * readers run on the frame thread, mid-guest-call. */

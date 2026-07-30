@@ -1,6 +1,7 @@
 /* libc.so -- errno, non-local jumps, process introspection, the stack guard.
  * The leftovers that belong to no single header. */
 
+#include <pvz2native/config.h>
 #include <pvz2native/dependencies/dependency.h>
 
 #include <cstring>
@@ -303,7 +304,7 @@ void build_passwd(GuestCall &c, std::uint32_t *out) {
         const std::uint32_t shell = strings + 64;
         c.put_cstr(name, "app");
         c.put_cstr(empty, "");
-        c.put_cstr(dir, "/data/data/com.ea.game.pvz2_rfl");
+        c.put_cstr(dir, std::string("/data/data/") + pvz2_config()->package_name);
         c.put_cstr(shell, "/system/bin/sh");
         c.write32(block + 0, name);
         c.write32(block + 4, empty);  /* pw_passwd */

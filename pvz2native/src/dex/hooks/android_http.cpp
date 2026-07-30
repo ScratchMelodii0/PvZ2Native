@@ -110,7 +110,7 @@ void release(DexCall &d) {
  * real null, or the std::string(const char*) that consumes it aborts the guest
  * (the same trap the Facebook and Cloud getters avoid). */
 void status_zero(DexCall &d) { d.ret(0); }
-void empty_string(DexCall &d) { d.ret_string(""); }
+/* empty-string getters use dex.h's shared hook_empty_string. */
 
 /* --- AndroidHttpProxy ------------------------------------------------------
  *
@@ -154,9 +154,9 @@ void register_android_http(HookTable &t) {
     t.add(kClass, "Release", release);
     t.add(kClass, "GetStatusCode", status_zero);
     t.add(kClass, "GetResponseLength", status_zero);
-    t.add(kClass, "GetStatusLine", empty_string);
-    t.add(kClass, "GetResponseHeader", empty_string);
-    t.add(kClass, "GetHumanReadableUrl", empty_string);
+    t.add(kClass, "GetStatusLine", hook_empty_string);
+    t.add(kClass, "GetResponseHeader", hook_empty_string);
+    t.add(kClass, "GetHumanReadableUrl", hook_empty_string);
 }
 
 }  // namespace dex
