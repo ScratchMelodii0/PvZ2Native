@@ -487,6 +487,17 @@ void Pvz2Env::handle_import_call(std::uint32_t idx) {
 }
 
 void Pvz2Env::CallSVC(std::uint32_t swi) {
+    /* During orderly session teardown, spawned guest workers must stop at the
+     * next host boundary rather than return into guest code. Blocking sync
+     * imports are explicitly awakened by request_guest_shutdown(), so every
+     * long-lived worker eventually reaches this boundary. */
+    if (guest_tls::self_id != 1 &&
+        rt->shutdown_requested.load(std::memory_order_acquire)) {
+        should_halt = true;
+        jit->HaltExecution();
+        return;
+    }
+
     if (swi == 0) {
         if (verbose_boot()) {
             std::lock_guard<std::mutex> lg(rt->log_lock);
@@ -872,13 +883,39 @@ std::uint32_t Pvz2Env::join_guest_thread_impl(GuestRuntime *rt, std::uint32_t id
     return it == rt->thread_retvals.end() ? 0 : it->second;
 }
 
+void request_guest_shutdown(GuestRuntime *rt) {
+    if (rt == nullptr) return;
+
+    rt->shutdown_requested.store(true, std::memory_order_release);
+
+    /* A worker may be asleep indefinitely inside either primitive. Merely
+     * setting the flag is insufficient: wake current waiters so their blocking
+     * imports can observe shutdown_requested and halt their guest JITs. */
+    {
+        std::lock_guard<std::mutex> lock(rt->conds_lock);
+        for (auto &entry : rt->guest_conds) {
+            entry.second->cv.notify_all();
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(rt->sems_lock);
+        for (auto &entry : rt->guest_sems) {
+            entry.second->cv.notify_all();
+        }
+    }
+}
+
 void join_leftover_guest_threads(GuestRuntime *rt) {
     std::vector<std::thread> leftover;
     {
         std::lock_guard<std::mutex> lock(rt->threads_lock);
-        for (auto &kv : rt->threads) leftover.push_back(std::move(kv.second));
+        for (auto &kv : rt->threads) {
+            leftover.push_back(std::move(kv.second));
+        }
         rt->threads.clear();
     }
+
     for (auto &th : leftover) {
         if (th.joinable()) th.join();
     }

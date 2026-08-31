@@ -397,6 +397,11 @@ void build_import_handler_cache(pvz2_elf_image_t *img);
  * session. Cleared at shutdown so neither can outlive it. */
 void set_session_image(pvz2_elf_image_t *img, GuestRuntime *rt);
 
+/* Requests a cooperative stop of all long-lived guest workers.
+ * Blocking pthread condition/semaphore waits are awakened so their import
+ * handlers can halt the corresponding JIT before teardown. */
+void request_guest_shutdown(GuestRuntime *rt);
+
 /* Joins any guest thread that outlived the call which spawned it -- their
  * lambdas hold raw pointers to both img and rt, so this must happen before
  * either dies. */

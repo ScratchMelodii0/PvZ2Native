@@ -266,16 +266,22 @@ extern "C" int pvz2_session_frame(pvz2_session_t *s) {
 
 extern "C" void pvz2_session_end(pvz2_session_t *s) {
     if (s == nullptr) return;
-    /* Stop the audio device first: its callback reads host buffers owned by the
-     * audio layer, and this is also what releases the guest thread parked in
-     * wait_for_completion() so it can unwind before its Jit goes away. */
+
+    /* Stop the host audio device first. Its completion worker is a guest thread
+     * and must be allowed to unwind before any guest JIT is destroyed. */
     pvz2native::audio::shutdown();
-    /* Any guest thread that outlived the call that spawned it holds raw
-     * pointers to both img and rt, so it must be joined before either dies. */
+
+    /* Long-lived guest workers can sleep indefinitely in pthread condition
+     * variables or semaphores. Request a cooperative stop before joining them,
+     * so every worker leaves its blocking import and unwinds its JIT normally. */
+    rt_::request_guest_shutdown(&s->rt);
+
+    /* Guest-thread contexts retain raw pointers to both the runtime and image. */
     rt_::join_leftover_guest_threads(&s->rt);
-    /* The shared main-thread Jit points at rt->monitor and its Env points at
-     * img, so it has to go before either -- see GuestThreadCtx. */
+
+    /* The main JIT references rt->monitor and the loaded guest image. */
     rt_::release_main_ctx();
+
     pvz2_elf_free(&s->img);
     rt_::set_session_image(nullptr, nullptr);
     delete s;

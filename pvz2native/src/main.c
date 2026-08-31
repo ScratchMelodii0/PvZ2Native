@@ -125,7 +125,19 @@ static void update_window_size(void) {
  * X button respond during startup; the OS reclaims everything. */
 static void handle_quit(void) {
     fflush(stdout);
-    exit(0);
+
+    /* During boot we may be trapped for seconds inside one guest call, so
+     * immediate process termination is still required to make the close button
+     * responsive. Once the session is fully booted, however, exit(0) would run
+     * C++ static destructors while Dynarmic guest/Mach-handler threads are still
+     * alive. Request an orderly shutdown instead so the main loop reaches
+     * pvz2_session_end(), which stops audio, joins guest threads and releases
+     * the JIT before SDL and process teardown. */
+    if (!g_booted) {
+        exit(0);
+    }
+
+    g_quit_requested = 1;
 }
 
 /* F11 toggles borderless fullscreen. FULLSCREEN_DESKTOP (not real fullscreen)

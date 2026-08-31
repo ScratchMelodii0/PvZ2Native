@@ -90,6 +90,13 @@ struct GuestRuntime {
     uint32_t next_thread_id = 2; /* 1 is reserved for the initial/"main" thread */
     uint32_t next_stack_slot = 0;
 
+    /* Session-wide cooperative stop requested by the host during shutdown.
+     * Guest workers may legitimately live for the entire process and block in
+     * pthread_cond_wait/sem_wait, so joining them without first waking them
+     * deadlocks teardown. Blocking shims include this flag in their predicates
+     * and halt their JIT instead of returning into guest code once it is set. */
+    std::atomic<bool> shutdown_requested{false};
+
     std::atomic<uint32_t> next_tls_key{1};
     std::mutex log_lock;
 
