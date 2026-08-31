@@ -91,7 +91,7 @@ Adding a new version = one entry in `kVersions` in [symbols.cpp](pvz2native/src/
 - **Linux:** GCC or Clang with C++20 support.
 - **macOS Apple Silicon:** Apple Clang / Xcode Command Line Tools, Ninja and Python 3.
 - A **GPU with OpenGL 2.0** or higher.
-- Your own copy of **`libPVZ2.so`** and the matching **`.obb`**, extracted from the Android game.
+- Your own legal game files. On macOS the easiest setup is **one APK + its matching OBB**; `compile-macos.sh` extracts the required ARM32 `libPVZ2.so` automatically.
 
 ---
 
@@ -179,32 +179,138 @@ make pvz2native
 
 ### macOS (Apple Silicon)
 
-The macOS build runs natively on Apple Silicon (`arm64`). The helper script
-creates its own Python virtual environment for GLAD, configures CMake for
-`arm64`, and builds the A32 guest frontend with Dynarmic's AArch64 host backend.
+The macOS build runs **natively on Apple Silicon (`arm64`)**. PvZ2's Android
+`libPVZ2.so` is still ARM32; Dynarmic translates that A32 guest code to the
+AArch64 host at runtime.
 
-Requirements:
+> [!IMPORTANT]
+> PvZ2Native does **not** include, host or download Plants vs. Zombies 2.
+> You must provide files from your own legally obtained copy of the game.
 
-- Xcode Command Line Tools / Apple Clang
-- CMake
-- Ninja
-- Python 3
+#### Beginner setup — only two game files
 
-Build a Release version:
+You do **not** need to open the APK or extract `libPVZ2.so` yourself.
+
+1. Clone the repository with its submodules:
+
+```bash
+git clone --recursive https://github.com/OptiJuegos/PvZ2Native.git
+cd PvZ2Native
+```
+
+2. Install the macOS build tools if needed:
+
+```bash
+xcode-select --install
+```
+
+With Homebrew installed:
+
+```bash
+brew install cmake ninja python3
+```
+
+3. Open the `game/` folder and put exactly **one APK** plus its **matching OBB**
+   directly inside it:
+
+```text
+PvZ2Native/
+├── game/
+│   ├── your-own-pvz2-copy.apk
+│   └── main.<versionCode>.<package>.obb
+├── compile-macos.sh
+└── ...
+```
+
+For example, one of the currently supported OBB names is:
+
+```text
+main.147.com.ea.game.pvz2_row.obb
+```
+
+Do not rename the OBB. Its filename contains information used by the game.
+
+4. Build:
 
 ```bash
 ./compile-macos.sh
 ```
 
-Useful options:
+The script will:
+
+```text
+check macOS / Apple Silicon tools
+        ↓
+find your APK and OBB in game/
+        ↓
+extract lib/armeabi-v7a/libPVZ2.so from the APK
+        ↓
+verify that libPVZ2.so is an ARM32 ELF
+        ↓
+configure CMake for native macOS arm64
+        ↓
+build PvZ2Native
+        ↓
+copy the prepared game files to build-macos/pvz2native/lib/
+```
+
+Nothing is downloaded from EA/PopCap and nothing from `game/` is committed by
+Git.
+
+5. When the build finishes, run:
+
+```bash
+./build-macos/pvz2native/pvz2native
+```
+
+On macOS a small native launcher appears before the game window. It only edits
+the existing `[video]` settings in `config.ini`, so the normal configuration
+system remains the single source of truth.
+
+The launcher provides:
+
+- starting resolution (`Auto`, `1280×720`, `1920×1080`, `Native`)
+- `60 FPS`, `120 FPS` or `Unlimited`
+- windowed or fullscreen start
+- `Play` / `Cancel`
+
+The executable is produced at:
+
+```text
+build-macos/pvz2native/pvz2native
+```
+
+and should report as a native Apple Silicon executable:
+
+```text
+Mach-O 64-bit executable arm64
+```
+
+#### Advanced / original asset workflow
+
+If you already extracted the Android library yourself, you can use the same
+style as the original project:
+
+```text
+game/
+├── libPVZ2.so
+└── matching-file.obb
+```
+
+When both an APK and `game/libPVZ2.so` are present, the already extracted
+`libPVZ2.so` takes priority.
+
+#### macOS build options
 
 | Option | Description |
 | --- | --- |
 | `-c, --clean` | Delete `build-macos/` before configuring |
-| `-d, --debug` | Configure a Debug build |
-| `-r, --release` | Configure a Release build (default) |
-| `-j, --jobs N` | Build using `N` parallel jobs |
-| `-h, --help` | Show the available options |
+| `-d, --debug` | Build Debug |
+| `-r, --release` | Build Release (default) |
+| `-j, --jobs N` | Use `N` parallel build jobs |
+| `-n, --no-assets` | Build only; do not copy/extract game files |
+| `-v, --verbose` | Print the complete CMake/build output |
+| `-h, --help` | Show help |
 
 Examples:
 
@@ -212,20 +318,31 @@ Examples:
 ./compile-macos.sh --clean --release
 ./compile-macos.sh --debug
 ./compile-macos.sh --jobs 4
+./compile-macos.sh --no-assets
 ```
 
-The executable ends up at:
+The full non-verbose build log is saved to:
 
 ```text
-build-macos/pvz2native/pvz2native
+build-macos/compile-macos.log
 ```
-
-The script does **not** include or download any game files. Supply your own
-legal `libPVZ2.so` and matching `.obb` as described below.
 
 ---
 
 ## ▶️ Running
+
+### macOS
+
+After `./compile-macos.sh` has prepared the build and your own game files:
+
+```bash
+./build-macos/pvz2native/pvz2native
+```
+
+The native macOS video launcher appears first; choosing **Play** continues into
+the same PvZ2Native core used by the command-line executable.
+
+### General / manual layout
 
 1. Place the game files next to the executable, by default in a `lib/` folder:
 

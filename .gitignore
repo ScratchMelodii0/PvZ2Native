@@ -1,5 +1,6 @@
 build/
-game/
+game/*
+!game/README.md
 *.swp
 *.swo
 *~

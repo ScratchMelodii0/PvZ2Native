@@ -4,6 +4,9 @@
 #include <SDL.h>
 #include <glad/gl.h>
 #include <pvz2native/config.h>
+#ifdef __APPLE__
+#include <pvz2native/platform/macos_launcher.h>
+#endif
 #include <pvz2native/gfx/frame_limiter.h>
 #include <pvz2native/gfx/gl_requirements.h>
 #include <pvz2native/gfx/video_mode.h>
@@ -272,6 +275,18 @@ int main(int argc, char **argv) {
     char ini_path[1024];
     SDL_snprintf(ini_path, sizeof(ini_path), "%sconfig.ini", base_path ? base_path : "");
     pvz2_config_load(ini_path, base_path ? base_path : "");
+
+#ifdef __APPLE__
+    /* macOS keeps the original config.ini workflow. The native launcher only
+     * edits the existing [video] settings, then the same parser reloads them. */
+    if (!pvz2_macos_show_launcher(ini_path, pvz2_config())) {
+        if (base_path) SDL_free(base_path);
+        SDL_Quit();
+        return 0;
+    }
+    pvz2_config_load(ini_path, base_path ? base_path : "");
+#endif
+
     if (base_path) SDL_free(base_path);
     const pvz2_config_t *cfg = pvz2_config();
     printf("so=%s\n", cfg->so_path);
