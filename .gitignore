@@ -5,3 +5,5 @@ game/
 *~
 .DS_Store
 Thumbs.db
+build-macos/
+.venv-macos/
