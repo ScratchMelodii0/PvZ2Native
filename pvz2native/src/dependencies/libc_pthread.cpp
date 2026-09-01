@@ -36,8 +36,9 @@ constexpr std::uint32_t kETIMEDOUT = 110;
  * which is the same epoch the host's system_clock uses. */
 std::chrono::system_clock::time_point deadline_from(GuestCall &c, std::uint32_t ts) {
     std::uint32_t sec = c.read32(ts), nsec = c.read32(ts + 4);
-    return std::chrono::system_clock::time_point(std::chrono::seconds(sec) +
-                                                 std::chrono::nanoseconds(nsec));
+    return std::chrono::system_clock::time_point(
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(
+            std::chrono::seconds(sec) + std::chrono::nanoseconds(nsec)));
 }
 
 /* ---------------------------------------------------------------- mutex
@@ -167,11 +168,24 @@ void c_cond_wait(GuestCall &c) {
      * wait still bumps it, so the predicate is already true. */
     std::uint64_t gen = gc->generation;
     gm->unlock(self);
-    if (!gc->cv.wait_for(lk, kStuckWarnAfter, [&] { return gc->generation != gen; })) {
+    if (!gc->cv.wait_for(lk, kStuckWarnAfter, [&] {
+            return gc->generation != gen ||
+                   c.rt->shutdown_requested.load(std::memory_order_acquire);
+        })) {
         c.log("[stuck] tid=%u blocked >3s in pthread_cond_wait(cond=0x%08x, mutex=0x%08x) lr=0x%08x",
               self, c.arg(0), c.arg(1), c.lr());
-        gc->cv.wait(lk, [&] { return gc->generation != gen; });
+        gc->cv.wait(lk, [&] {
+            return gc->generation != gen ||
+                   c.rt->shutdown_requested.load(std::memory_order_acquire);
+        });
     }
+
+    if (c.rt->shutdown_requested.load(std::memory_order_acquire)) {
+        lk.unlock();
+        c.halt("runtime_shutdown");
+        return;
+    }
+
     lk.unlock();
     gm->lock(self);
     c.set_result(0);
@@ -186,7 +200,17 @@ void c_cond_timedwait(GuestCall &c) {
     std::unique_lock<std::mutex> lk(gc->m);
     std::uint64_t gen = gc->generation;
     gm->unlock(self);
-    bool woke = gc->cv.wait_until(lk, deadline, [&] { return gc->generation != gen; });
+    bool woke = gc->cv.wait_until(lk, deadline, [&] {
+        return gc->generation != gen ||
+               c.rt->shutdown_requested.load(std::memory_order_acquire);
+    });
+
+    if (c.rt->shutdown_requested.load(std::memory_order_acquire)) {
+        lk.unlock();
+        c.halt("runtime_shutdown");
+        return;
+    }
+
     lk.unlock();
     gm->lock(self);
     c.set_result(woke ? 0u : kETIMEDOUT);
@@ -274,7 +298,10 @@ void c_sem_wait(GuestCall &c) {
     GuestSem *gs = c.rt->get_or_create_sem(c.arg(0));
     std::unique_lock<std::mutex> lk(gs->m);
     gs->waiters++;
-    if (!gs->cv.wait_for(lk, kStuckWarnAfter, [&] { return gs->count > 0; })) {
+    if (!gs->cv.wait_for(lk, kStuckWarnAfter, [&] {
+            return gs->count > 0 ||
+                   c.rt->shutdown_requested.load(std::memory_order_acquire);
+        })) {
         /* Report with this semaphore's mutex released: the dump walks every
          * other semaphore and would otherwise hold two of them at once. */
         lk.unlock();
@@ -282,8 +309,19 @@ void c_sem_wait(GuestCall &c) {
               c.arg(0), c.lr());
         report_sems(c);
         lk.lock();
-        gs->cv.wait(lk, [&] { return gs->count > 0; });
+        gs->cv.wait(lk, [&] {
+            return gs->count > 0 ||
+                   c.rt->shutdown_requested.load(std::memory_order_acquire);
+        });
     }
+
+    if (c.rt->shutdown_requested.load(std::memory_order_acquire)) {
+        gs->waiters--;
+        lk.unlock();
+        c.halt("runtime_shutdown");
+        return;
+    }
+
     gs->waiters--;
     gs->count--;
     c.set_result(0);
@@ -306,7 +344,15 @@ void c_sem_timedwait(GuestCall &c) {
     GuestSem *gs = c.rt->get_or_create_sem(c.arg(0));
     auto deadline = deadline_from(c, c.arg(1));
     std::unique_lock<std::mutex> lk(gs->m);
-    if (gs->cv.wait_until(lk, deadline, [&] { return gs->count > 0; })) {
+    if (gs->cv.wait_until(lk, deadline, [&] {
+            return gs->count > 0 ||
+                   c.rt->shutdown_requested.load(std::memory_order_acquire);
+        })) {
+        if (c.rt->shutdown_requested.load(std::memory_order_acquire)) {
+            lk.unlock();
+            c.halt("runtime_shutdown");
+            return;
+        }
         gs->count--;
         c.set_result(0);
         return;

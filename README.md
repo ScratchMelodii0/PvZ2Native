@@ -2,7 +2,7 @@
 
 📖 [Español](readme_spanish.md) · **English**
 
-**Runs the real native library of *Plants vs. Zombies 2* for Android (`libPVZ2.so`, ARM32) on PC.** The only thing that is emulated is the **CPU**: PvZ2 exists only compiled for ARM (there is no x86/x64 build), so a JIT translates its ARM instructions to x86_64. Everything else — Android, JNI, libc, OpenGL ES, the filesystem — **is not emulated, it is reimplemented natively**, the same way **Wine** does with Windows.
+**Runs the real native library of *Plants vs. Zombies 2* for Android (`libPVZ2.so`, ARM32) on PC.** The only thing that is emulated is the **CPU**: PvZ2 exists only compiled for ARM (there is no x86/x64 build), so a JIT translates its ARM instructions to the native host architecture (x86_64 or arm64). Everything else — Android, JNI, libc, OpenGL ES, the filesystem — **is not emulated, it is reimplemented natively**, the same way **Wine** does with Windows.
 
 > [!WARNING]
 > Experimental project under active development. It boots as far as the main-menu load; rendering, audio and input are work in progress. **The game is not included**: you must supply your own `libPVZ2.so` and your own `.obb`.
@@ -13,7 +13,7 @@
 
 It is not a *port* of the game's source code. It is a **hybrid of two techniques**, and the distinction matters:
 
-- **Only the CPU is emulated.** The game binary is ARM machine code and PvZ2 was never compiled for x86/x64, so there is no way to run it directly on a PC processor. A JIT (dynarmic) reads those ARM instructions and translates them to x86_64 on the fly. This is the only "emulated" part.
+- **Only the CPU is emulated.** The game binary is ARM machine code and PvZ2 was never compiled for x86/x64, so there is no way to run it directly on a PC processor. A JIT (dynarmic) reads those ARM instructions and translates them to the native host architecture (x86_64 or arm64) on the fly. This is the only "emulated" part.
 - **Android is NOT emulated: it is reimplemented.** When the game calls an Android function (open a file, draw with OpenGL ES, allocate memory, invoke Java…), that call is serviced by **native PC code** that does the real work using the equivalent desktop API. There is no virtual Android running underneath; there is a **reimplementation** of the functions the game needs.
 
 This is exactly **Wine's** approach — *"Wine Is Not an Emulator"* — taken one step further: Wine reimplements Windows calls without emulating anything because `.exe` files are already x86; here, because the game is ARM, the CPU has to be emulated as well. The rest of the philosophy is identical: **translate calls, don't simulate a whole machine.**
@@ -25,7 +25,7 @@ This is exactly **Wine's** approach — *"Wine Is Not an Emulator"* — taken on
                         │  ARM instructions
                         ▼
 ┌──────────────────────────────────────────────┐
-│   dynarmic  —  JIT ARM32 → x86_64             │   ← ONLY emulated component
+│   dynarmic  —  JIT ARM32 → x86_64 / arm64     │   ← ONLY emulated component
 └───────────────────────┬──────────────────────┘      (the CPU only)
                         │  "Android" calls
                         ▼
@@ -39,7 +39,7 @@ This is exactly **Wine's** approach — *"Wine Is Not an Emulator"* — taken on
                         │
                         ▼
 ┌──────────────────────────────────────────────┐
-│   Windows x64  ·  SDL2  ·  OpenGL 2.0 (glad)  │
+│ Windows/Linux x64 · macOS arm64 · SDL2 · OpenGL │
 └──────────────────────────────────────────────┘
 ```
 
@@ -85,12 +85,13 @@ Adding a new version = one entry in `kVersions` in [symbols.cpp](pvz2native/src/
 
 ## ⚙️ Requirements
 
-- **(64-bit) Windows or Linux** (the executable is static x86_64; there is no 32-bit build — dynarmic only ships backends for x86_64/arm64/riscv64).
+- **64-bit Windows or Linux**, or **macOS on Apple Silicon (arm64)**. There is no 32-bit host build — dynarmic ships host backends for x86_64, arm64 and riscv64.
 - **CMake** (3.1+).
 - **Windows:** MinGW-w64 (GCC with C++20 support).
 - **Linux:** GCC or Clang with C++20 support.
+- **macOS Apple Silicon:** Apple Clang / Xcode Command Line Tools, Ninja and Python 3.
 - A **GPU with OpenGL 2.0** or higher.
-- Your own copy of **`libPVZ2.so`** and the matching **`.obb`**, extracted from the Android game.
+- Your own legal game files. On macOS the easiest setup is **one APK + its matching OBB**; `compile-macos.sh` extracts the required ARM32 `libPVZ2.so` automatically.
 
 ---
 
@@ -176,9 +177,172 @@ cd build
 make pvz2native
 ```
 
+### macOS (Apple Silicon)
+
+The macOS build runs **natively on Apple Silicon (`arm64`)**. PvZ2's Android
+`libPVZ2.so` is still ARM32; Dynarmic translates that A32 guest code to the
+AArch64 host at runtime.
+
+> [!IMPORTANT]
+> PvZ2Native does **not** include, host or download Plants vs. Zombies 2.
+> You must provide files from your own legally obtained copy of the game.
+
+#### Beginner setup — only two game files
+
+You do **not** need to open the APK or extract `libPVZ2.so` yourself.
+
+1. Clone the repository with its submodules:
+
+```bash
+git clone --recursive https://github.com/OptiJuegos/PvZ2Native.git
+cd PvZ2Native
+```
+
+2. Install the macOS build tools if needed:
+
+```bash
+xcode-select --install
+```
+
+With Homebrew installed:
+
+```bash
+brew install cmake ninja python3
+```
+
+3. Open the `game/` folder and put exactly **one APK** plus its **matching OBB**
+   directly inside it:
+
+```text
+PvZ2Native/
+├── game/
+│   ├── your-own-pvz2-copy.apk
+│   └── main.<versionCode>.<package>.obb
+├── compile-macos.sh
+└── ...
+```
+
+For example, one of the currently supported OBB names is:
+
+```text
+main.147.com.ea.game.pvz2_row.obb
+```
+
+Do not rename the OBB. Its filename contains information used by the game.
+
+4. Build:
+
+```bash
+./compile-macos.sh
+```
+
+The script will:
+
+```text
+check macOS / Apple Silicon tools
+        ↓
+find your APK and OBB in game/
+        ↓
+extract lib/armeabi-v7a/libPVZ2.so from the APK
+        ↓
+verify that libPVZ2.so is an ARM32 ELF
+        ↓
+configure CMake for native macOS arm64
+        ↓
+build PvZ2Native
+        ↓
+copy the prepared game files to build-macos/pvz2native/lib/
+```
+
+Nothing is downloaded from EA/PopCap and nothing from `game/` is committed by
+Git.
+
+5. When the build finishes, run:
+
+```bash
+./build-macos/pvz2native/pvz2native
+```
+
+On macOS a small native launcher appears before the game window. It only edits
+the existing `[video]` settings in `config.ini`, so the normal configuration
+system remains the single source of truth.
+
+The launcher provides:
+
+- starting resolution (`Auto`, `1280×720`, `1920×1080`, `Native`)
+- `60 FPS`, `120 FPS` or `Unlimited`
+- windowed or fullscreen start
+- `Play` / `Cancel`
+
+The executable is produced at:
+
+```text
+build-macos/pvz2native/pvz2native
+```
+
+and should report as a native Apple Silicon executable:
+
+```text
+Mach-O 64-bit executable arm64
+```
+
+#### Advanced / original asset workflow
+
+If you already extracted the Android library yourself, you can use the same
+style as the original project:
+
+```text
+game/
+├── libPVZ2.so
+└── matching-file.obb
+```
+
+When both an APK and `game/libPVZ2.so` are present, the already extracted
+`libPVZ2.so` takes priority.
+
+#### macOS build options
+
+| Option | Description |
+| --- | --- |
+| `-c, --clean` | Delete `build-macos/` before configuring |
+| `-d, --debug` | Build Debug |
+| `-r, --release` | Build Release (default) |
+| `-j, --jobs N` | Use `N` parallel build jobs |
+| `-n, --no-assets` | Build only; do not copy/extract game files |
+| `-v, --verbose` | Print the complete CMake/build output |
+| `-h, --help` | Show help |
+
+Examples:
+
+```bash
+./compile-macos.sh --clean --release
+./compile-macos.sh --debug
+./compile-macos.sh --jobs 4
+./compile-macos.sh --no-assets
+```
+
+The full non-verbose build log is saved to:
+
+```text
+build-macos/compile-macos.log
+```
+
 ---
 
 ## ▶️ Running
+
+### macOS
+
+After `./compile-macos.sh` has prepared the build and your own game files:
+
+```bash
+./build-macos/pvz2native/pvz2native
+```
+
+The native macOS video launcher appears first; choosing **Play** continues into
+the same PvZ2Native core used by the command-line executable.
+
+### General / manual layout
 
 1. Place the game files next to the executable, by default in a `lib/` folder:
 
@@ -269,6 +433,7 @@ PvZ2Native/
 ├── SDL/  glad/  zlib/  stb/  third_party/
 ├── compile.bat           ← MinGW build
 ├── compile.sh            ← Linux build
+├── compile-macos.sh      ← macOS Apple Silicon build
 ├── CMakeLists.txt
 └── README.md
 ```

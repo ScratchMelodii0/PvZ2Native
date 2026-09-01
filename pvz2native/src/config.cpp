@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 namespace {
@@ -164,9 +165,9 @@ const Setting kSettings[] = {
     {"game", "package_name", nullptr, Kind::kString, offsetof(pvz2_config_t, package_name),
      sizeof(g_config.package_name),
      "The Android package name the engine is told it runs as. Must match the\n"
-     "package baked into [paths] obb's filename (main.<versionCode>.<package>.obb)\n"
-     "or the RSB load fails and boot never leaves the loading screen.",
-     "com.ea.game.pvz2_na", nullptr},
+     "package baked into [paths] obb's filename (main.<versionCode>.<package>.obb).\n"
+     "Leave commented to derive it automatically from the OBB filename.",
+     nullptr, "com.ea.game.pvz2_na"},
     {"game", "activity_name", nullptr, Kind::kString, offsetof(pvz2_config_t, activity_name),
      sizeof(g_config.activity_name), "The Activity class name reported back to the engine.",
      "com.popcap.PvZ2.PvZ2GameActivity", nullptr},
@@ -395,6 +396,69 @@ void finish_defaults(const char *base_dir) {
     finish_path(g_config.obb_path, sizeof(g_config.obb_path), base_dir, lib + kDefaultObbName);
     finish_path(g_config.save_dir, sizeof(g_config.save_dir), base_dir,
                 base_with_sep(base_dir) + "save");
+
+    /* If [paths] obb is left unset, prefer the one unambiguous .obb already
+     * present in <exe>/lib. This keeps the original local game-file workflow
+     * while avoiding a manual config edit just because the supported version
+     * uses a different OBB filename. */
+    if (g_config.obb_path[0] == '\0') {
+        const std::filesystem::path lib_dir =
+            std::filesystem::path(base_with_sep(base_dir)) / "lib";
+        std::error_code ec;
+        std::filesystem::path only_obb;
+        unsigned obb_count = 0;
+
+        if (std::filesystem::is_directory(lib_dir, ec)) {
+            for (const auto &entry : std::filesystem::directory_iterator(lib_dir, ec)) {
+                if (ec) break;
+                if (!entry.is_regular_file(ec)) continue;
+                if (lower(entry.path().extension().string()) != ".obb") continue;
+
+                only_obb = entry.path();
+                ++obb_count;
+                if (obb_count > 1) break;
+            }
+        }
+
+        if (obb_count == 1) {
+            set_path(g_config.obb_path, sizeof(g_config.obb_path), only_obb.string());
+        }
+    }
+
+    finish_path(g_config.obb_path, sizeof(g_config.obb_path), base_dir, lib + kDefaultObbName);
+
+    /* main.<versionCode>.<package>.obb carries the Android package name.
+     * Derive it only when config.ini leaves package_name unset; an explicit
+     * config value still wins. */
+    if (g_config.package_name[0] == '\0') {
+        std::string name = g_config.obb_path;
+        const std::size_t slash = name.find_last_of("/\\");
+        if (slash != std::string::npos) name.erase(0, slash + 1);
+
+        constexpr const char prefix[] = "main.";
+        constexpr const char suffix[] = ".obb";
+        if (name.rfind(prefix, 0) == 0 &&
+            name.size() > sizeof(prefix) - 1 + sizeof(suffix) - 1 &&
+            name.compare(name.size() - (sizeof(suffix) - 1),
+                         sizeof(suffix) - 1, suffix) == 0) {
+            const std::size_t version_end = name.find('.', sizeof(prefix) - 1);
+            if (version_end != std::string::npos) {
+                const std::size_t package_begin = version_end + 1;
+                const std::size_t package_len =
+                    name.size() - package_begin - (sizeof(suffix) - 1);
+                if (package_len > 0) {
+                    const std::string package = name.substr(package_begin, package_len);
+                    std::snprintf(g_config.package_name, sizeof(g_config.package_name),
+                                  "%s", package.c_str());
+                }
+            }
+        }
+
+        if (g_config.package_name[0] == '\0') {
+            std::snprintf(g_config.package_name, sizeof(g_config.package_name),
+                          "com.ea.game.pvz2_na");
+        }
+    }
 
     if (g_config.user_locale[0] == '\0')
         std::snprintf(g_config.user_locale, sizeof(g_config.user_locale), "en_US");

@@ -1,7 +1,10 @@
 build/
-game/
+game/*
+!game/README.md
 *.swp
 *.swo
 *~
 .DS_Store
 Thumbs.db
+build-macos/
+.venv-macos/
