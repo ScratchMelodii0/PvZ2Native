@@ -87,6 +87,26 @@ constexpr std::uint32_t kFakeObjStride = 0x40;
 constexpr std::uint32_t kFakeObjMax = 16;
 constexpr std::uint32_t kFakeObjEnd = kFakeObjBase + kFakeObjMax * kFakeObjStride;
 
+/* --- guest-function hook islands ------------------------------------------ *
+ *
+ * One small block of real guest code per installed entry hook, holding that
+ * function's relocated first instruction followed by a branch back into its
+ * body -- see game/hooks.h. A hook handler calls the island to run "the
+ * original", which is what makes a hook a hook rather than a replacement.
+ *
+ * They live here, below the image, rather than in the guest heap: hooks are
+ * installed before the heap exists, and their addresses must stay fixed for the
+ * life of the process because the rewritten instruction in the .so points at
+ * them and dynarmic caches that translation.
+ *
+ * kHookIslandStride is 16 rather than the 8 bytes two ARM words need, so a
+ * later hook that has to relocate a longer prologue does not move every island
+ * and invalidate every already-cached translation. */
+constexpr std::uint32_t kHookIslandBase = 0x00010000;
+constexpr std::uint32_t kHookIslandStride = 16;
+constexpr std::uint32_t kHookIslandMax = 256;
+constexpr std::uint32_t kHookIslandEnd = kHookIslandBase + kHookIslandMax * kHookIslandStride;
+
 /* --- the layout is consistent, checked at build time ---------------------- */
 
 static_assert(kTrampolineEnd <= kFakeHandleBase,
@@ -106,8 +126,10 @@ static_assert(kJavaVmStubsAddr + kJavaVmSlots * 4 <= kJavaVmPtrAddr,
 static_assert(kJavaVmPtrAddr + 4 <= kScratchAddr, "the JavaVM* word overlaps the scratch area");
 static_assert(kScratchAddr + kScratchSize <= kFakeObjBase,
               "the scratch area overlaps the GameAppInitialize placeholder objects");
-static_assert(kFakeObjEnd <= kImageBase,
-              "the placeholder objects run into the loaded .so image");
+static_assert(kFakeObjEnd <= kHookIslandBase,
+              "the placeholder objects overlap the hook islands");
+static_assert(kHookIslandEnd <= kImageBase,
+              "the hook islands run into the loaded .so image");
 
 }  // namespace memmap
 }  // namespace runtime

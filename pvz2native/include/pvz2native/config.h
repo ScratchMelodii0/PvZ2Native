@@ -48,6 +48,28 @@ typedef struct pvz2_config {
      * purchasable. Defaults ON -- see pvz2_config_load. */
     int emulate_iap;
 
+    /* Run a libPVZ2.so that matches no entry in kVersions, using the entry
+     * points recovered from its own JNINativeMethod arrays -- see
+     * game_symbols_detect. Defaults ON: those addresses come out of the binary
+     * in front of it rather than from a guess about which release it is, and a
+     * required native that cannot be recovered still refuses to boot. Turn it
+     * off to insist on a version the project has actually verified. */
+    int auto_version;
+
+    /* Where mod packs are loaded from. Every immediate subfolder is one mod --
+     * see mods/mod_host.h. Empty, or a folder that does not exist, simply loads
+     * nothing. Default <exe folder>/mods. */
+    char mods_dir[512];
+
+    /* Load native plugin libraries from a mod folder (.dll|.so|.dylib).
+     *
+     * A native plugin runs as host code with no sandbox of any kind: it can do
+     * anything this process can. Asset and config-driven mods cannot, which is
+     * why they are always on and this is a separate switch -- turning it off
+     * leaves a mod folder's file overrides working while refusing to execute
+     * anybody's code. Default ON, because that is what a mod loader is for. */
+    int mod_plugins;
+
     /* Identity strings the engine asks Java for -- end up in save files, the
      * fabricated purchase receipt and analytics payloads. package_name is the
      * one with a correctness requirement: ResourceManager builds the RSB path

@@ -72,14 +72,29 @@ Notable pieces:
 
 ## 🎮 Supported game versions
 
-The version is detected by a **byte fingerprint** at two known native functions; if none matches, boot is refused rather than running blind.
+The version is detected by a **byte fingerprint** at two known native functions.
 
 | Version | APK / OBB | Status |
 | --- | --- | --- |
 | **1.6.10** (2013) | `main.7.com.ea.game.pvz2_na.obb` | 🟢 Boots to the menu |
 | **4.5.2** (2016) | `main.147.com.ea.game.pvz2_row.obb` | 🟢 Boots to the menu |
+| **9.6.1** (Reflourished, arm32) | `main.675.com.ea.game.pvz2_rfl.obb` | 🟡 Partial |
 
 Adding a new version = one entry in `kVersions` in [symbols.cpp](pvz2native/src/game/symbols.cpp). Nothing in `runtime/` or `engine/` changes between versions.
+
+A build that matches no entry is no longer a dead end: the loader decodes the `JNINativeMethod` arrays inside the binary, recovers the lifecycle natives **by name**, boots under a synthetic version (`auto:9f3c2a11`), and prints a ready-to-paste `kVersions` entry. Turn it off with `[game] auto_version = 0`. See **[docs/ADDING_A_VERSION.md](docs/ADDING_A_VERSION.md)**.
+
+---
+
+## 🧟 Mods
+
+A mod is a folder in `mods/`, and all three of its parts are optional:
+
+- **`assets/`** — any file in it stands in for the game file of the same name, `main.rsb` included. No code, no addresses.
+- **`mod.ini`** — guest-code patches, each checked against the instruction it expects before anything is written, and each able to name a function by symbol rather than by address so it survives a game update.
+- **a plugin** (`.dll`/`.so`/`.dylib`) — host code that can hook guest functions, call the original, rewrite arguments and results, and scan the binary for whatever the symbol table does not name. The whole interface is one C header, [`mod_api.h`](pvz2native/include/pvz2native/mods/mod_api.h); a plugin links against nothing.
+
+Start from [`mods/example-frame-counter/`](mods/example-frame-counter/) and read **[docs/MODDING.md](docs/MODDING.md)**.
 
 ---
 
@@ -423,12 +438,15 @@ PvZ2Native/
 │   │   ├── dependencies/  ← one module per Android .so (libc, libm, GLES, …) + VFS
 │   │   ├── dex/           ← fake JNIEnv/JavaVM + per-Java-class hooks
 │   │   ├── engine/        ← boot / lifecycle / frame
-│   │   ├── game/          ← symbols.cpp: addresses per binary version
+│   │   ├── game/          ← symbols.cpp (addresses per version), scanner, hooks, patches
+│   │   ├── mods/          ← mod pack discovery + the native plugin API
 │   │   ├── diagnostics/   ← watchpoints, probes, PC sampling
 │   │   ├── gfx/, audio/, input/, patch/, elf32/
 │   │   ├── config.cpp     ← config.ini reader
 │   │   └── main.c         ← SDL window + frame loop
 │   └── include/pvz2native/
+├── docs/                  ← ADDING_A_VERSION.md, MODDING.md
+├── mods/                  ← mod packs (example-frame-counter/ is a template)
 ├── dynarmic/              ← ARM JIT (submodule/dependency)
 ├── SDL/  glad/  zlib/  stb/  third_party/
 ├── compile.bat           ← MinGW build

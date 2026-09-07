@@ -162,6 +162,15 @@ const Setting kSettings[] = {
      "the game requests completes for free; off = store reports not supported.",
      "1", nullptr},
 
+    {"game", "auto_version", nullptr, Kind::kBool, offsetof(pvz2_config_t, auto_version), 0,
+     "Run a libPVZ2.so this build does not have an entry for, using the entry\n"
+     "points read out of its own JNINativeMethod tables. The addresses come from\n"
+     "the binary itself, not from a guess -- but only the lifecycle natives can be\n"
+     "recovered that way, so globals, guest-code patches and the frame/touch\n"
+     "diagnostics stay off until somebody adds the version properly.\n"
+     "See docs/ADDING_A_VERSION.md; the log prints a ready-to-paste entry.",
+     "1", nullptr},
+
     {"game", "package_name", nullptr, Kind::kString, offsetof(pvz2_config_t, package_name),
      sizeof(g_config.package_name),
      "The Android package name the engine is told it runs as. Must match the\n"
@@ -199,6 +208,19 @@ const Setting kSettings[] = {
      "is online makes the loading screen wait forever for downloads that can\n"
      "never arrive. The store does NOT need this -- it is emulated locally.",
      "none", nullptr},
+    {"mods", "dir", nullptr, Kind::kPath, offsetof(pvz2_config_t, mods_dir),
+     sizeof(g_config.mods_dir),
+     "Where mod packs live. Each immediate subfolder is one mod: an assets/\n"
+     "folder overrides game files, a mod.ini applies guest-code patches, and a\n"
+     "plugin library is loaded as host code. Default <exe folder>/mods.\n"
+     "See docs/MODDING.md.",
+     nullptr, "mods"},
+    {"mods", "plugins", nullptr, Kind::kBool, offsetof(pvz2_config_t, mod_plugins), 0,
+     "Load native plugin libraries from mod folders. A plugin is host code with\n"
+     "no sandbox -- it can do anything this program can. Off still applies asset\n"
+     "overrides and mod.ini patches, it just refuses to run anybody's code.",
+     "1", nullptr},
+
 };
 
 /* --- small helpers --------------------------------------------------------- */
@@ -396,6 +418,8 @@ void finish_defaults(const char *base_dir) {
     finish_path(g_config.obb_path, sizeof(g_config.obb_path), base_dir, lib + kDefaultObbName);
     finish_path(g_config.save_dir, sizeof(g_config.save_dir), base_dir,
                 base_with_sep(base_dir) + "save");
+    finish_path(g_config.mods_dir, sizeof(g_config.mods_dir), base_dir,
+                base_with_sep(base_dir) + "mods");
 
     /* If [paths] obb is left unset, prefer the one unambiguous .obb already
      * present in <exe>/lib. This keeps the original local game-file workflow
