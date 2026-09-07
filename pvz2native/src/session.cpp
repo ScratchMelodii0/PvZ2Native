@@ -27,6 +27,7 @@
 #include <pvz2native/diagnostics/diagnostics.h>
 #include <pvz2native/engine/engine.h>
 #include <pvz2native/game/patches.h>
+#include <pvz2native/mods/mod_host.h>
 #include <pvz2native/game/symbols.h>
 #include <pvz2native/pvz2_session.h>
 #include <pvz2native/runtime/dynarmic_config.h>
@@ -136,6 +137,15 @@ extern "C" pvz2_session_t *pvz2_session_start(const char *so_path) {
     /* Lets make_guest_callback() and call_guest_between_frames() reach this
      * session -- the OpenSL layer mints trampolines through both. */
     rt_::set_session_image(&s->img, &s->rt);
+
+    /* Mods, in the one window where they can do anything, and no earlier than
+     * this: the version is known (so a mod can ask for a symbol rather than an
+     * address), no guest instruction has executed yet (so rewriting one still
+     * means something -- dynarmic caches translated blocks), and the session
+     * image is published, which is what a hook needs to mint its SVC stub.
+     * Asset overlays are mounted here too, which only has to beat the first
+     * file the engine opens. */
+    pvz2native::mods::load_all(&s->img, &s->rt);
 
     /* Load-time bring-up, then the registered-native lifecycle, in the exact
      * order the real Android runtime uses -- see engine/. */

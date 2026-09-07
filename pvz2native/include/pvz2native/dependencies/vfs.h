@@ -32,9 +32,31 @@ namespace vfs {
 const char *obb_host_path();
 const char *obb_guest_path();
 
-/* Guest path -> host path. Any path whose basename is "main.rsb" is redirected
- * to the .obb (the engine assembles that name itself from its resource folder),
- * and reaching either form sets rt->rsb_touched. */
+/* --- mod overlays ----------------------------------------------------------
+ *
+ * A folder whose contents stand in for game files. Every path the guest opens
+ * is looked for in the mounted overlays, most recently mounted first, before it
+ * is resolved against the real game data -- so a mod that ships
+ * assets/main.rsb replaces the .obb, and one that ships assets/<something>.dat
+ * replaces that file, without either of them touching the original.
+ *
+ * The match is by FILE NAME, and by the last two path components when the mod
+ * ships a folder structure: the guest's paths are Android absolute paths built
+ * by the engine from a package name and a version code, so a mod cannot know
+ * them ahead of time and matching them literally would make every mod
+ * build-specific. So "<overlay>/main.rsb" and "<overlay>/properties/main.rsb"
+ * both answer a guest asking for ".../properties/main.rsb", and the second wins
+ * over the first when both exist.
+ *
+ * Mounting is startup-only: the list is read from guest threads on every path
+ * translation and is never locked. */
+void mount_overlay(const std::string &host_dir, const std::string &mod_name);
+unsigned overlay_count();
+
+/* Any path whose basename is "main.rsb" is redirected to the .obb (the engine
+ * assembles that name itself from its resource folder), and reaching either
+ * form sets rt->rsb_touched. A mounted overlay is consulted first and wins over
+ * both. */
 std::string translate(GuestRuntime *rt, std::string guest_path);
 
 /* bionic/ARM open(2) flag bits -> host _O_* values. They differ for

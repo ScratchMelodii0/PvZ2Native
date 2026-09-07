@@ -5,8 +5,11 @@
 #include <pvz2native/config.h>
 
 #include <cctype>
+#include <cstdio>
 #include <fcntl.h>
+#include <filesystem>
 #include <string>
+#include <vector>
 
 #if defined(_WIN32)
 #include <io.h>
@@ -31,6 +34,65 @@ const char *obb_guest_path() {
     static const std::string guest = std::string("/") + pvz2_config()->obb_path;
     return guest.c_str();
 }
+
+namespace {
+
+/* One mounted overlay. Startup-only, appended to and never erased -- see the
+ * header for why it needs no lock. */
+struct Overlay {
+    std::string dir;
+    std::string mod;
+};
+std::vector<Overlay> g_overlays;
+
+/* The last `components` path components of `p`, e.g. "properties/main.rsb". */
+std::string tail_of(const std::string &p, unsigned components) {
+    std::size_t at = p.size();
+    for (unsigned i = 0; i < components; ++i) {
+        const std::size_t slash = p.find_last_of('/', at == 0 ? 0 : at - 1);
+        if (slash == std::string::npos || at == 0) return p;
+        at = slash;
+    }
+    return p.substr(at + 1);
+}
+
+/* An overlay file standing in for `p`, or an empty string.
+ *
+ * More specific wins: the two-component form is tried before the bare file
+ * name, so a mod that ships properties/main.rsb is not answered by its own
+ * unrelated top-level main.rsb. Between overlays, the most recently mounted
+ * wins -- last mod loaded is the one on top, which is the convention every mod
+ * manager uses. */
+std::string overlay_for(const std::string &p) {
+    if (g_overlays.empty()) return {};
+    const std::string two = tail_of(p, 2);
+    const std::string one = tail_of(p, 1);
+    if (one.empty()) return {};
+    for (std::size_t i = g_overlays.size(); i-- > 0;) {
+        for (const std::string &rel : {two, one}) {
+            if (rel.empty() || rel == p) continue; /* p itself: not a relative name */
+            std::string cand = g_overlays[i].dir + "/" + rel;
+            std::error_code ec;
+            if (std::filesystem::is_regular_file(cand, ec)) {
+                std::printf("pvz2: [mod] %s overrides %s with %s\n", g_overlays[i].mod.c_str(),
+                            one.c_str(), cand.c_str());
+                std::fflush(stdout);
+                return cand;
+            }
+        }
+    }
+    return {};
+}
+
+}  // namespace
+
+void mount_overlay(const std::string &host_dir, const std::string &mod_name) {
+    std::error_code ec;
+    if (!std::filesystem::is_directory(host_dir, ec)) return;
+    g_overlays.push_back({host_dir, mod_name});
+}
+
+unsigned overlay_count() { return (unsigned)g_overlays.size(); }
 
 std::string translate(GuestRuntime *rt, std::string p) {
     /* SexyAppFramework's VFS tags every resource lookup with a scheme prefix
@@ -62,6 +124,19 @@ std::string translate(GuestRuntime *rt, std::string p) {
     std::size_t slash = p.find_last_of('/');
     std::string base = (slash == std::string::npos) ? p : p.substr(slash + 1);
     for (char &c : base) c = (char)std::tolower((unsigned char)c);
+
+    /* A mod's copy of this file, if any, before the real game data. Checked
+     * after the path is fully normalised so an overlay matches what the engine
+     * actually asked for, and before the .obb redirect so a mod CAN replace the
+     * main archive -- which is the single most useful thing a mod pack can do. */
+    const std::string overridden = overlay_for(p);
+    if (!overridden.empty()) {
+        if (rt != nullptr && (base == "main.rsb" ||
+                              (base.size() > 4 && base.compare(base.size() - 4, 4, ".obb") == 0))) {
+            rt->rsb_touched = true;
+        }
+        return overridden;
+    }
 
     if (base == "main.rsb") {
         if (rt != nullptr) rt->rsb_touched = true;

@@ -283,13 +283,55 @@ struct GameSymbols {
  * which therefore is not in the per-version lists above. */
 extern const char *const kGameAppClass;
 
-/* Identifies the loaded image against the built-in table.
+/* Identifies the loaded image and prepares the active table.
  *
- * Returns false when nothing matches, having logged the candidates it tried and
- * what it found instead -- which is the report someone adding a version needs.
- * Booting anyway would mean calling whatever happens to sit at another build's
- * offsets, so the caller must refuse to start. */
+ * Three outcomes, in the order they are tried:
+ *
+ *   1. A kVersions entry whose two fingerprints both match. This is the only
+ *      outcome that proves an entry's addresses belong to THIS binary, so it
+ *      always wins, and everything the entry maps is used verbatim.
+ *
+ *   2. Nothing matches, but the JNINativeMethod arrays in the image yield every
+ *      REQUIRED native by name (see game/scanner.h). The addresses then come
+ *      from the binary itself rather than from a guess about which release it
+ *      is, so the boot is allowed to proceed under a synthetic version name
+ *      ("auto:9f3c2a11"), and a paste-ready kVersions skeleton is printed. Only
+ *      the natives, the GameAppInitialize argument list and the fingerprints can
+ *      be recovered this way; globals, patches and diagnostics stay unmapped,
+ *      which each of their consumers already treats as "off".
+ *      [game] auto_version = 0 turns this off and restores the old behaviour.
+ *
+ *   3. Neither. Returns false, having logged every candidate it tried and what
+ *      it found instead -- the report someone adding a version needs. Booting
+ *      anyway would mean calling whatever happens to sit at another build's
+ *      offsets, so the caller must refuse to start.
+ *
+ * On outcome 1 the scan still runs, in a purely advisory role: a native the
+ * entry leaves at 0 is filled in from it, and one whose address DISAGREES with
+ * the table is reported. A disagreement means the entry is describing a
+ * different build than the fingerprints admitted to, which is worth hearing
+ * about immediately rather than as a crash later. */
 bool game_symbols_detect(const pvz2_elf_image_t *img);
+
+/* Prints every field of the active table, mapped and unmapped alike.
+ *
+ * The unmapped half is the useful half: it is exactly the list of work left to
+ * do for this build, and each line names the field the way game_symbols_lookup
+ * and the mod API spell it. Called after detection when [log] verbose is on. */
+void game_symbols_report();
+
+/* One field of the active table, by the dotted name the report prints
+ * ("native.on_draw_frame", "global.app_driver", "fn.string_ctor", ...).
+ *
+ * This is how a mod names a guest function without naming an address: the core
+ * resolves it per version, and a mod written against "native.on_draw_frame"
+ * keeps working on a build that came out afterwards. Returns 0 for an unknown
+ * name and for a field this version does not map -- the same 0 that means
+ * "unmapped" everywhere else, and callers must treat it as such.
+ *
+ * Only the scalar offset fields are addressable; the argument lists and the
+ * fingerprints are not, having no meaning as an address. */
+std::uint32_t game_symbols_lookup(const char *dotted_name);
 
 /* The detected table. Before a successful detect it is all zeroes with
  * version "unknown", so a stray read cannot hand out a plausible-looking
